@@ -1,2 +1,6 @@
-[build]
+[target.x86_64-unknown-linux-gnu]
 rustflags = ["-C", "target-cpu=native"]
+
+[target.bpfel-unknown-none]
+linker = "bpf-linker"
+rustflags = ["-C", "linker-plugin-lto"]

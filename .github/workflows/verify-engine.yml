@@ -8,7 +8,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: "-C target-cpu=native"
 
 jobs:
   validate-and-test:
@@ -36,3 +35,20 @@ jobs:
 
       - name: Run Speculative Kernel
         run: cargo run --release --bin speculative_kernel
+
+  build-ebpf:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code Base
+        uses: actions/checkout@v4
+
+      - name: Setup Nightly Rust Toolchain
+        uses: dtolnay/rust-toolchain@nightly-2025-12-01
+        with:
+          components: rust-src
+
+      - name: Install BPF Linker
+        run: cargo +nightly-2025-12-01 install bpf-linker --version 0.9.14
+
+      - name: Build eBPF Object
+        run: cargo build -Z build-std=core --release -p moe-ebpf-kernel --target bpfel-unknown-none

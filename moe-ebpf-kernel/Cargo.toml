@@ -1,0 +1,15 @@
+[package]
+name = "moe-ebpf-kernel"
+version = "0.1.0"
+edition = "2021"
+autobins = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+path = "src/main.rs"
+test = false
+doctest = false
+
+[dependencies]
+aya-ebpf = "0.1.0"
+network-types = "0.0.5"

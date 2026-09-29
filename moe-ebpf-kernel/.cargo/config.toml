@@ -1,0 +1,7 @@
+[build]
+target = "bpfel-unknown-none"
+rustflags = ["-C", "linker-plugin-lto"]
+
+[target.bpfel-unknown-none]
+runner = "true"
+linker = "bpf-linker"

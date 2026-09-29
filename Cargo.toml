@@ -26,6 +26,17 @@ core_affinity = "0.8"
 socket2 = "0.6"
 libc = "0.2"
 crossbeam-channel = "0.5"
+aya = "0.12.0"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+
+[[bin]]
+name = "xdp_loader"
+path = "src/bin/xdp_loader.rs"
+
+[workspace]
+members = [".", "moe-ebpf-kernel"]
+default-members = ["."]
+resolver = "2"
 
 [[bench]]
 name = "holistic_benchmarks"

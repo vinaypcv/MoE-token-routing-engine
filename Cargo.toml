@@ -2,6 +2,7 @@
 name = "moe_holistic_engine"
 version = "1.0.0"
 edition = "2021"
+default-run = "moe_holistic_engine"
 autobins = false
 authors = ["Independent Solo Professional"]
 description = "A holistic, zero-copy distributed MoE token routing, multi-GPU mmap, and thread-pinned engine."

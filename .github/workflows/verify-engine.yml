@@ -28,5 +28,11 @@ jobs:
       - name: Run Deep Static Memory Analysis Lints
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-      - name: Compile and Run Release Test Sweep
-        run: cargo run --release
+      - name: Run Tests
+        run: cargo test
+
+      - name: Run Main Engine
+        run: cargo run --release --bin moe_holistic_engine
+
+      - name: Run Speculative Kernel
+        run: cargo run --release --bin speculative_kernel

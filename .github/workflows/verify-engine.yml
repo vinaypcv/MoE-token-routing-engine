@@ -1,0 +1,32 @@
+name: Infrastructure Compilation & Verification Pipeline
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-C target-cpu=native"
+
+jobs:
+  validate-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code Base
+        uses: actions/checkout@v4
+
+      - name: Setup System Stable Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Verify Formatting Layouts
+        run: cargo fmt --check
+
+      - name: Run Deep Static Memory Analysis Lints
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Compile and Run Release Test Sweep
+        run: cargo run --release

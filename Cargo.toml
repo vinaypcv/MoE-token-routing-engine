@@ -14,6 +14,10 @@ path = "src/main.rs"
 name = "moe_holistic_engine"
 path = "src/bin/moe_holistic_engine.rs"
 
+[[bin]]
+name = "speculative_kernel"
+path = "src/bin/speculative_kernel.rs"
+
 [dependencies]
 rio = "0.9"
 crossbeam-utils = "0.8"

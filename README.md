@@ -26,3 +26,13 @@ cargo bench --bench holistic_benchmarks
 ```
 
 The benchmark reports measured-phase throughput and total datagrams sent and received, including warmup sweeps.
+
+## Speculative routing prototype
+
+Run the experimental prediction/validation state-machine simulation with:
+
+```bash
+cargo run --release --bin speculative_kernel
+```
+
+The prototype sends loopback UDP packets using synthetic predicted and actual expert IDs, then records matches and invalidations with atomic state transitions. It does not consume intermediate attention states, implement a learned top-k predictor, route to physical GPUs, or guarantee zero network latency. The elapsed time is the measured simulation runtime, not a measurement of latency hidden behind real model computation.

@@ -42,7 +42,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "moe-prometheus"
       },
       "fieldConfig": {
         "defaults": {
@@ -98,7 +98,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "moe-prometheus"
       },
       "fieldConfig": {
         "defaults": {
@@ -154,7 +154,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "moe-prometheus"
       },
       "fieldConfig": {
         "defaults": {
@@ -213,7 +213,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "moe-prometheus"
       },
       "fieldConfig": {
         "defaults": {

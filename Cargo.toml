@@ -27,7 +27,7 @@ socket2 = "0.6"
 libc = "0.2"
 crossbeam-channel = "0.5"
 aya = "0.12.0"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net", "io-util"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net", "io-util", "time"] }
 xsk-rs = { version = "0.11.0", features = ["use_cc_build"] }
 
 [[bin]]
@@ -41,6 +41,10 @@ path = "src/bin/bench_ingestion.rs"
 [[bin]]
 name = "traffic_profiler"
 path = "src/bin/traffic_profiler.rs"
+
+[[bin]]
+name = "telemetry_demo"
+path = "src/bin/telemetry_demo.rs"
 
 [workspace]
 members = [".", "moe-ebpf-kernel"]

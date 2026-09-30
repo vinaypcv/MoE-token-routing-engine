@@ -175,11 +175,18 @@ impl TelemetryServer {
                 };
                 let request = String::from_utf8_lossy(&request[..length]);
                 let metrics_path = request.starts_with("GET /metrics ");
+                let dashboard_path = request.starts_with("GET / ");
                 let (status, content_type, body) = if metrics_path {
                     (
                         "200 OK",
                         "text/plain; version=0.0.4; charset=utf-8",
                         telemetry.render_prometheus(),
+                    )
+                } else if dashboard_path {
+                    (
+                        "200 OK",
+                        "text/html; charset=utf-8",
+                        LIVE_DASHBOARD.to_owned(),
                     )
                 } else {
                     (
@@ -197,6 +204,37 @@ impl TelemetryServer {
         }
     }
 }
+
+const LIVE_DASHBOARD: &str = r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MoE Pipeline Live Metrics</title>
+<style>
+:root{color-scheme:dark;--bg:#101719;--panel:#192326;--line:#344448;--text:#e7f0ed;--muted:#9db0ad;--green:#66d6a5;--amber:#f2bd65;--red:#f07878}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 system-ui,sans-serif}main{max-width:1100px;margin:0 auto;padding:28px 22px}header{display:flex;justify-content:space-between;align-items:end;border-bottom:1px solid var(--line);padding-bottom:18px;margin-bottom:22px}h1{font-size:24px;margin:0}p{margin:4px 0 0;color:var(--muted)}.status{font-size:13px;color:var(--green)}.grid{display:grid;grid-template-columns:repeat(4,minmax(140px,1fr));gap:12px}.metric,.panel{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:16px}.label{font-size:12px;color:var(--muted);text-transform:uppercase}.value{font-size:26px;font-variant-numeric:tabular-nums;margin-top:5px}.panel{margin-top:14px}.panel h2{font-size:16px;margin:0 0 12px}.rows{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:8px}.expert{border-top:1px solid var(--line);padding:9px 0}.expert strong{display:block;font-variant-numeric:tabular-nums}.bar{height:5px;background:#304044;margin-top:7px}.bar i{display:block;height:100%;background:var(--green)}footer{color:var(--muted);font-size:12px;margin-top:16px}@media(max-width:720px){.grid{grid-template-columns:repeat(2,1fr)}.rows{grid-template-columns:repeat(2,1fr)}header{align-items:start;gap:8px;flex-direction:column}}
+</style>
+</head>
+<body><main>
+<header><div><h1>MoE Pipeline</h1><p>Live process telemetry · refreshes every 2 seconds</p></div><div id="status" class="status">Connecting…</div></header>
+<section class="grid">
+<article class="metric"><div class="label">RX packets</div><div class="value" id="rx">—</div></article>
+<article class="metric"><div class="label">Dispatched</div><div class="value" id="dispatch">—</div></article>
+<article class="metric"><div class="label">Processed</div><div class="value" id="processed">—</div></article>
+<article class="metric"><div class="label">Queue drops</div><div class="value" id="drops">—</div></article>
+</section>
+<section class="panel"><h2>Expert queues and drops</h2><div class="rows" id="experts"></div></section>
+<section class="panel"><h2>Frame and error counters</h2><div class="grid">
+<div><div class="label">Invalid packets</div><strong id="invalid">—</strong></div><div><div class="label">Execution errors</div><strong id="errors">—</strong></div><div><div class="label">Frames recycled</div><strong id="recycled">—</strong></div><div><div class="label">Recycle failures</div><strong id="recycle-errors">—</strong></div>
+</div></section>
+<footer>Demo mode counts received UDP traffic and simulates bounded worker service; it is not AF_XDP/NIC telemetry. The XDP loader reports real counters only while attached to a supported interface. Prometheus endpoint: <a href="/metrics" style="color:var(--green)">/metrics</a></footer>
+</main>
+<script>
+const numberFmt=new Intl.NumberFormat();
+function parseMetrics(text){const values=new Map();for(const line of text.split(/\r?\n/)){if(!line||line[0]==='#')continue;const split=line.lastIndexOf(' ');if(split<0)continue;values.set(line.slice(0,split),Number(line.slice(split+1)));}return values;}
+async function update(){try{const response=await fetch('/metrics',{cache:'no-store'});if(!response.ok)throw new Error('HTTP '+response.status);const m=parseMetrics(await response.text());const get=(name)=>m.get(name)||0;for(const [id,name] of [['rx','moe_rx_packets_total'],['dispatch','moe_dispatched_total'],['processed','moe_processed_jobs_total'],['drops','moe_saturated_drops_total'],['invalid','moe_invalid_packets_total'],['errors','moe_execution_errors_total'],['recycled','moe_recycled_frames_total'],['recycle-errors','moe_recycle_failures_total']])document.getElementById(id).textContent=numberFmt.format(get(name));let html='';for(let i=0;i<8;i++){const depth=get(`moe_expert_queue_depth{expert_id="${i}"}`),drop=get(`moe_expert_drops_total{expert_id="${i}"}`),sent=get(`moe_expert_dispatched_total{expert_id="${i}"}`);html+=`<div class="expert"><span>Expert ${i}</span><strong>${numberFmt.format(depth)} queued</strong><small>${numberFmt.format(sent)} dispatched · ${numberFmt.format(drop)} dropped</small><div class="bar"><i style="width:${Math.min(100,depth/10)}%"></i></div></div>`;}document.getElementById('experts').innerHTML=html;document.getElementById('status').textContent='LIVE · '+new Date().toLocaleTimeString();}catch(error){document.getElementById('status').textContent='Metrics unavailable · '+error.message;}}update();setInterval(update,2000);
+</script></body></html>"#;
 
 #[cfg(test)]
 mod tests {

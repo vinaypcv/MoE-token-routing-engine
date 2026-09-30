@@ -47,7 +47,17 @@ The profiler arguments are `<target-addr> <threads> [seconds] [experts] [uniform
 
 When `xdp_loader` is attached, it starts a Prometheus text endpoint at `http://127.0.0.1:9100/metrics`; set `MOE_METRICS_ADDR` to override the bind address. The default expert worker currently runs a small synchronous linear-model placeholder over feature bytes following the 10-byte token header. Packets containing only the header are reported as execution errors; replace the model implementation when defining the production tensor payload format.
 
+To preview the live dashboard without an XDP-capable NIC, run `cargo run --release --bin telemetry_demo` and open `http://127.0.0.1:9100/`. This mode counts UDP packets sent to `MOE_DEMO_UDP_ADDR` (default `127.0.0.1:9000`) and simulates bounded per-expert worker service; its counters are not AF_XDP or NIC telemetry. Set `MOE_METRICS_ADDR` to change the dashboard/metrics bind address, `MOE_DEMO_QUEUE_CAPACITY` to adjust simulated queue bounds, and `MOE_DEMO_SERVICE_PER_TICK` to adjust simulated service capacity.
+
 Import [docs/grafana/moe-af-xdp-dashboard.json](docs/grafana/moe-af-xdp-dashboard.json) into Grafana and select the Prometheus source scraping `/metrics`. The endpoint binds to loopback by default; to scrape from a separate host or container, set `MOE_METRICS_ADDR=0.0.0.0:9100` and restrict network access appropriately.
+
+For the complete local Phase 2 preview (Prometheus, Grafana, UDP receiver, and uniform/skewed traffic phases), start Docker and run:
+
+```bash
+bash scripts/run_traffic_storm_demo.sh
+```
+
+The script builds the required Rust binaries, starts UDP-driven simulated worker telemetry plus Prometheus/Grafana, and runs uniform and hot-expert traffic phases. It prints the URLs and cleanup commands. Queue service is simulated; this preview does not attach XDP or measure NIC/AF_XDP zero-copy performance.
 
 See [docs/ARCHITECTURE_EBPF_AF_XDP.md](docs/ARCHITECTURE_EBPF_AF_XDP.md) for the XDP parser, verifier, UMEM, and ring ownership specification.
 

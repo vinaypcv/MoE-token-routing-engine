@@ -1,6 +1,9 @@
 use aya::maps::XskMap;
 use aya::programs::{Xdp, XdpFlags};
 use aya::Bpf;
+use moe_holistic_engine::engine::backpressure::{
+    BackpressureRouter, DEFAULT_EXPERT_COUNT, DEFAULT_EXPERT_QUEUE_CAPACITY,
+};
 use std::env;
 use std::error::Error;
 use std::num::NonZeroU32;
@@ -10,13 +13,17 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
-use xsk_rs::config::{BindFlags, Interface, LibxdpFlags, SocketConfig, UmemConfig};
+use xsk_rs::config::{
+    BindFlags, FrameSize, Interface, LibxdpFlags, QueueSize, SocketConfig, UmemConfig,
+};
 use xsk_rs::socket::Socket;
 use xsk_rs::umem::Umem;
 
-const UMEM_FRAME_COUNT: u32 = 2048;
+const UMEM_FRAME_COUNT: u32 = 4096;
+const RX_RING_SIZE: u32 = 2048;
 const RX_BATCH_SIZE: usize = 64;
 const XSK_MAP_CAPACITY: u32 = 64;
+const FILL_BATCH_SIZE: usize = 64;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -38,12 +45,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut bpf = Bpf::load_file(&object_path)?;
 
+    let umem_config = UmemConfig::builder()
+        .frame_size(FrameSize::new(4096)?)
+        .fill_queue_size(QueueSize::new(RX_RING_SIZE)?)
+        .build()?;
     let (umem, mut free_frames) = Umem::new(
-        UmemConfig::default(),
+        umem_config,
         NonZeroU32::new(UMEM_FRAME_COUNT).expect("frame count is non-zero"),
         false,
     )?;
     let socket_config = SocketConfig::builder()
+        .rx_queue_size(QueueSize::new(RX_RING_SIZE)?)
         .libxdp_flags(LibxdpFlags::XSK_LIBXDP_FLAGS_INHIBIT_PROG_LOAD)
         .bind_flags(BindFlags::XDP_ZEROCOPY)
         .build();
@@ -56,16 +68,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
         queues.ok_or("AF_XDP socket did not provide fill/completion queues")?;
 
     // Seed the RX fill ring before publishing the socket in XSK_MAP.
-    let seeded_frames =
-        unsafe { fill_queue.produce_and_wakeup(&free_frames, rx_queue.fd_mut(), 100)? };
-    if seeded_frames != free_frames.len() {
+    let seed_count = RX_RING_SIZE as usize;
+    let seeded_frames = unsafe {
+        fill_queue.produce_and_wakeup(&free_frames[..seed_count], rx_queue.fd_mut(), 100)?
+    };
+    if seeded_frames != seed_count {
         return Err(format!(
-            "only {seeded_frames} of {} UMEM frames fit in the RX fill ring",
-            free_frames.len()
+            "only {seeded_frames} of {seed_count} UMEM frames fit in the RX fill ring"
         )
         .into());
     }
-    free_frames.clear();
+    free_frames.drain(..seeded_frames);
 
     {
         let xsk_map = bpf
@@ -88,43 +101,90 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("Object: {}", object_path.display());
     println!("Press Ctrl+C to stop receiving and detach.");
 
+    let router = BackpressureRouter::new(
+        umem.clone(),
+        DEFAULT_EXPERT_COUNT,
+        DEFAULT_EXPERT_QUEUE_CAPACITY,
+        UMEM_FRAME_COUNT as usize,
+    )?;
+    let metrics = router.metrics();
+
     let running = Arc::new(AtomicBool::new(true));
     let receiver_running = Arc::clone(&running);
     let receiver_umem = umem.clone();
-    let receiver = thread::spawn(move || -> std::io::Result<u64> {
+    let receiver = thread::spawn(move || -> std::io::Result<()> {
         let mut descriptors = vec![xsk_rs::FrameDesc::default(); RX_BATCH_SIZE];
-        let mut packet_count = 0u64;
+        let mut fill_batch = [xsk_rs::FrameDesc::default(); FILL_BATCH_SIZE];
 
         while receiver_running.load(Ordering::Acquire) {
-            let received = unsafe { rx_queue.poll_and_consume(&mut descriptors, 100)? };
-            if received == 0 {
-                continue;
+            let recycle_capacity = UMEM_FRAME_COUNT as usize - free_frames.len();
+            router.drain_recycled(&mut free_frames, recycle_capacity);
+
+            while !free_frames.is_empty() {
+                let batch_len = free_frames.len().min(FILL_BATCH_SIZE);
+                for slot in fill_batch.iter_mut().take(batch_len) {
+                    *slot = free_frames
+                        .pop()
+                        .expect("batch length is bounded by free frames");
+                }
+                let submitted = unsafe {
+                    fill_queue.produce_and_wakeup(
+                        &fill_batch[..batch_len],
+                        rx_queue.fd_mut(),
+                        100,
+                    )?
+                };
+                for descriptor in fill_batch.iter().take(batch_len).skip(submitted) {
+                    free_frames.push(*descriptor);
+                }
+                if submitted == 0 {
+                    break;
+                }
             }
 
-            packet_count += received as u64;
-            let recycled = unsafe {
-                fill_queue.produce_and_wakeup(&descriptors[..received], rx_queue.fd_mut(), 100)?
-            };
-            if recycled != received {
-                return Err(std::io::Error::other(format!(
-                    "recycled {recycled} of {received} RX frames"
-                )));
+            let received = unsafe { rx_queue.poll_and_consume(&mut descriptors, 25)? };
+            for descriptor in descriptors.iter().take(received).copied() {
+                let packet = unsafe { receiver_umem.data(&descriptor) };
+                match router.dispatch_frame(descriptor, packet.contents()) {
+                    Ok(()) => {}
+                    Err((rejected_frame, _reason)) => free_frames.push(rejected_frame),
+                }
             }
         }
 
-        drop(receiver_umem);
-        Ok(packet_count)
+        // The program is detached before shutdown; recycle anything already queued in RX.
+        loop {
+            let received = unsafe { rx_queue.poll_and_consume(&mut descriptors, 0)? };
+            if received == 0 {
+                break;
+            }
+            free_frames.extend(descriptors.iter().take(received).copied());
+        }
+
+        free_frames.extend(router.shutdown());
+        drop((fill_queue, rx_queue));
+        Ok(())
     });
 
     tokio::signal::ctrl_c().await?;
     running.store(false, Ordering::Release);
-    let received_packets = receiver
+    program.detach(link_id)?;
+    receiver
         .join()
         .map_err(|_| std::io::Error::other("AF_XDP receive thread panicked"))??;
-
-    program.detach(link_id)?;
     drop(bpf);
     drop((tx_queue, completion_queue, umem));
-    println!("Detached XDP program; received {received_packets} redirected packets.");
+    println!("Detached XDP program.");
+    println!("Received: {}", metrics.total_rx.load(Ordering::Relaxed));
+    println!("Dispatched: {}", metrics.dispatched.load(Ordering::Relaxed));
+    println!("Processed: {}", metrics.processed.load(Ordering::Relaxed));
+    println!(
+        "Saturated drops: {}",
+        metrics.saturated_drops.load(Ordering::Relaxed)
+    );
+    println!(
+        "Invalid packets: {}",
+        metrics.invalid_packets.load(Ordering::Relaxed)
+    );
     Ok(())
 }

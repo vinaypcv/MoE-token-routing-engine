@@ -6,7 +6,7 @@ The XDP component classifies Ethernet/IPv4/UDP frames and redirects matching tok
 
 The implementation requests AF_XDP zero-copy mode. Socket creation fails if the selected interface/queue cannot provide that mode. A successful build does not prove successful attachment, verifier acceptance on a particular kernel, driver support, or zero-copy operation on the host. Those require a privileged runtime test on a supported Linux interface and driver.
 
-The current loader consumes and recycles received UMEM descriptors; it does not yet parse/process token contents in its receive loop, transmit responses, implement expert-specific queues, or measure AF_XDP throughput.
+The loader parses token headers in place and dispatches descriptor ownership through bounded per-expert channels. Worker threads currently validate the marker and return frames; they do not perform model inference, transmit responses, or measure AF_XDP throughput.
 
 ## 2. Packet path
 
@@ -25,7 +25,13 @@ XSKMAP[RX queue id]
 AF_XDP socket RX ring <---- UMEM frame addresses from fill ring
     |
     v
-xdp_loader consumes descriptors and returns frames to the fill ring
+xdp_loader parses in UMEM and dispatches the descriptor to a bounded expert queue
+    |
+    v
+worker completes placeholder work and returns descriptor through recycler
+    |
+    v
+ingress loop returns descriptor to the fill ring
 ```
 
 AF_XDP zero-copy mode can allow a supported NIC driver to DMA packet data into UMEM-backed frames. It is not an unconditional property of XDP or AF_XDP: it depends on the driver, device, kernel, bind flags, and interface queue. `XDP_ZEROCOPY` requests that mode and should fail rather than silently fall back when unsupported.
@@ -34,13 +40,13 @@ AF_XDP zero-copy mode can allow a supported NIC driver to DMA packet data into U
 
 The loader creates one UMEM and one AF_XDP socket for the selected `(interface, queue_id)` pair. The socket FD is installed at the same queue index in `XSK_MAP`; XSKMAP redirect succeeds only when the target socket is bound to the RX queue on which the packet arrived.
 
-- **UMEM**: page-aligned memory managed by the AF_XDP library and divided into fixed-size frames. The current loader uses the library's default frame configuration and 2,048 frames; it does not hard-code a 4,096-byte frame size.
+- **UMEM**: page-aligned memory managed by the AF_XDP library and divided into fixed-size frames. The current loader configures 4,096 frames of 4,096 bytes each (16 MiB total backing memory).
 - **Fill ring**: initially populated with free UMEM frame descriptors. The kernel uses these frames for incoming packets.
 - **RX ring**: carries descriptors identifying received UMEM frame offsets and lengths. Packet bytes remain in UMEM; the descriptor is metadata, not a copy of the packet.
 - **Completion ring**: is created with the socket for transmit completion accounting. The current loader retains it but does not transmit packets.
 - **Frame recycling**: after consumption, descriptors are returned to the fill ring. A frame must not be read or reused by the application while the kernel owns it.
 
-The loader seeds the fill ring before publishing the socket in XSKMAP and attaching the XDP program. It currently manages one queue per process invocation. Multi-queue deployments need one correctly bound socket and populated map entry per active queue (or another explicit queue-selection design).
+The loader seeds the fill ring before publishing the socket in XSKMAP and attaching the XDP program. It keeps a 4,096-frame UMEM pool, a 2,048-entry fill/RX ring, and bounded per-expert channels (1,024 jobs each by default). Invalid frames and full/closed expert queues are counted and returned to the ingress-owned free-frame pool immediately. Completed jobs return descriptors over a bounded recycler channel sized to the UMEM pool. Separate expert queues isolate a busy expert's backlog from other expert workers; the current single ingress poller remains a shared throughput limit. It currently manages one queue per process invocation. Multi-queue deployments need one correctly bound socket and populated map entry per active queue (or another explicit queue-selection design).
 
 ## 4. Packet layout and parser rules
 
@@ -102,4 +108,4 @@ The default object path is `target/bpfel-unknown-none/release/libmoe_ebpf_kernel
 
 Do not interpret `recvmmsg` as eliminating context switches: it amortizes receive syscall overhead across a batch. AF_XDP zero-copy does not mean zero syscalls, zero CPU work, or guaranteed zero latency. Throughput depends on packet size, CPU/NUMA placement, NIC and driver, queue count, interrupt/polling mode, kernel configuration, and generator capacity. No fixed packets-per-second figures are claimed here; use repeatable measurements on the target hardware.
 
-The repository's earlier loopback UDP figures are simulation measurements, not NIC throughput or an AF_XDP comparison. `bench_ingestion` provides a batched UDP receive baseline; AF_XDP measurement still requires a supported interface, traffic generator, and runtime instrumentation of the AF_XDP consumer.
+The repository's earlier loopback UDP figures are simulation measurements, not NIC throughput or an AF_XDP comparison. `bench_ingestion` provides a batched UDP receive baseline, while `traffic_profiler` generates batched UDP token-header traffic with uniform or hot-expert distributions. Neither is a raw-Ethernet AF_XDP load generator. AF_XDP measurement still requires a supported interface, an appropriate traffic generator, and runtime instrumentation of the AF_XDP consumer.

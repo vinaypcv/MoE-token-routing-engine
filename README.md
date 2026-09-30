@@ -35,6 +35,16 @@ cargo run --release --bin bench_ingestion -- 127.0.0.1:9000 3
 
 To listen for an external UDP generator instead, append `--external`. This measures the normal UDP socket path, not AF_XDP; see [docs/ARCHITECTURE_EBPF_AF_XDP.md](docs/ARCHITECTURE_EBPF_AF_XDP.md) for the AF_XDP measurement caveats.
 
+Generate batched UDP token-header traffic with configurable workers, distribution, duration, and optional aggregate packet-rate limit:
+
+```bash
+cargo run --release --bin traffic_profiler -- 127.0.0.1:9000 4 5 8 skewed 70 0
+```
+
+This sends UDP payloads for socket-path testing; it does not create Ethernet frames or guarantee traffic reaches an AF_XDP-capable NIC queue.
+
+The profiler arguments are `<target-addr> <threads> [seconds] [experts] [uniform|skewed] [hot-percent] [total-pps]`. Use `total-pps` of `0` for unpaced sending.
+
 See [docs/ARCHITECTURE_EBPF_AF_XDP.md](docs/ARCHITECTURE_EBPF_AF_XDP.md) for the XDP parser, verifier, UMEM, and ring ownership specification.
 
 ## Speculative routing prototype

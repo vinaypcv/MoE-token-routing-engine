@@ -38,6 +38,10 @@ path = "src/bin/xdp_loader.rs"
 name = "bench_ingestion"
 path = "src/bin/bench_ingestion.rs"
 
+[[bin]]
+name = "traffic_profiler"
+path = "src/bin/traffic_profiler.rs"
+
 [workspace]
 members = [".", "moe-ebpf-kernel"]
 default-members = ["."]

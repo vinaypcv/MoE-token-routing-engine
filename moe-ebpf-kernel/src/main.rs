@@ -1,12 +1,21 @@
 #![no_std]
 
-use aya_ebpf::{bindings::xdp_action, macros::xdp, programs::XdpContext};
+use aya_ebpf::{
+    bindings::xdp_action,
+    macros::{map, xdp},
+    maps::XskMap,
+    programs::XdpContext,
+};
 use core::mem;
 use network_types::{eth::EthHdr, ip::Ipv4Hdr, udp::UdpHdr};
 
 const IPV4_ETHERTYPE: [u8; 2] = [0x08, 0x00];
 const UDP_PROTOCOL: u8 = 17;
 const MOE_MAGIC: u8 = 0x77;
+const XSK_MAP_ENTRIES: u32 = 64;
+
+#[map]
+static XSK_MAP: XskMap = XskMap::with_max_entries(XSK_MAP_ENTRIES, 0);
 
 #[repr(C, packed)]
 pub struct TokenPacketHeader {
@@ -85,9 +94,26 @@ fn try_xdp_router(ctx: &XdpContext) -> Result<u32, ()> {
         return Ok(xdp_action::XDP_PASS);
     }
 
+    let fragment_flags = read_be_u16(ctx, ipv4_offset + 6)?;
+    if fragment_flags & 0x3fff != 0 {
+        return Ok(xdp_action::XDP_PASS);
+    }
+
+    let ip_total_len = read_be_u16(ctx, ipv4_offset + 2)? as usize;
+    if ip_total_len < ihl_bytes + udp_len + mem::size_of::<TokenPacketHeader>() {
+        return Ok(xdp_action::XDP_PASS);
+    }
+
     let udp_offset = ipv4_offset.checked_add(ihl_bytes).ok_or(())?;
     if !frame_has_range(ctx, udp_offset, udp_len) {
         return Err(());
+    }
+
+    let udp_total_len = read_be_u16(ctx, udp_offset + 4)? as usize;
+    if udp_total_len < udp_len + mem::size_of::<TokenPacketHeader>()
+        || udp_total_len > ip_total_len - ihl_bytes
+    {
+        return Ok(xdp_action::XDP_PASS);
     }
 
     let token_header_offset = udp_offset.checked_add(udp_len).ok_or(())?;
@@ -97,8 +123,12 @@ fn try_xdp_router(ctx: &XdpContext) -> Result<u32, ()> {
     }
 
     if read_u8(ctx, token_header_offset)? == MOE_MAGIC {
-        // Classification only: no redirect map is configured yet, so preserve normal delivery.
-        return Ok(xdp_action::XDP_PASS);
+        let queue_id = unsafe { (*ctx.ctx).rx_queue_index };
+        if queue_id < XSK_MAP_ENTRIES {
+            return Ok(XSK_MAP
+                .redirect(queue_id, 0)
+                .unwrap_or(xdp_action::XDP_PASS));
+        }
     }
 
     Ok(xdp_action::XDP_PASS)

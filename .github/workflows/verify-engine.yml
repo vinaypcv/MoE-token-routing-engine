@@ -16,6 +16,9 @@ jobs:
       - name: Checkout Code Base
         uses: actions/checkout@v4
 
+      - name: Install AF_XDP Build Dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang llvm m4 libelf-dev zlib1g-dev
+
       - name: Setup System Stable Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -41,6 +44,9 @@ jobs:
     steps:
       - name: Checkout Code Base
         uses: actions/checkout@v4
+
+      - name: Install AF_XDP Build Dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang llvm m4 libelf-dev zlib1g-dev
 
       - name: Setup Nightly Rust Toolchain
         uses: dtolnay/rust-toolchain@master

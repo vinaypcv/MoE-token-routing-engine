@@ -28,6 +28,7 @@ libc = "0.2"
 crossbeam-channel = "0.5"
 aya = "0.12.0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+xsk-rs = { version = "0.11.0", features = ["use_cc_build"] }
 
 [[bin]]
 name = "xdp_loader"

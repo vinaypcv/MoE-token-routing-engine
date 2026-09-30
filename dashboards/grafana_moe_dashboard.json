@@ -1,0 +1,78 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": true,
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "moe-prometheus"},
+      "fieldConfig": {"defaults": {"unit": "pps", "custom": {"drawStyle": "line", "lineWidth": 2}}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "id": 1,
+      "targets": [
+        {"expr": "rate(moe_rx_packets_total[5s]) / 1000", "legendFormat": "Ingress RX (Kpps)", "refId": "A"},
+        {"expr": "rate(moe_dispatched_total[5s]) / 1000", "legendFormat": "Dispatched (Kpps)", "refId": "B"}
+      ],
+      "title": "Ingress Datagram Rate (Kpps)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "moe-prometheus"},
+      "fieldConfig": {"defaults": {"unit": "ops", "custom": {"drawStyle": "bars", "fillOpacity": 75}}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "id": 2,
+      "targets": [
+        {"expr": "sum by (expert_id) (rate(moe_expert_drops_total[5s]))", "legendFormat": "Expert {{expert_id}} drops/s", "refId": "A"},
+        {"expr": "rate(moe_saturated_drops_total[5s])", "legendFormat": "All saturated drops/s", "refId": "B"}
+      ],
+      "title": "Per-Expert Saturation and Drops",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "moe-prometheus"},
+      "fieldConfig": {"defaults": {"unit": "short", "custom": {"drawStyle": "line", "lineWidth": 2}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 800}, {"color": "red", "value": 1000}]}}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "id": 3,
+      "targets": [{"expr": "moe_expert_queue_depth", "legendFormat": "Expert {{expert_id}} depth", "refId": "A"}],
+      "title": "Live Expert Channel Queue Depths (Bounded: 1024)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "moe-prometheus"},
+      "fieldConfig": {"defaults": {"unit": "ops", "custom": {"drawStyle": "line", "lineWidth": 2}, "color": {"fixedColor": "green", "mode": "fixed"}}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "id": 4,
+      "targets": [{"expr": "rate(moe_recycled_frames_total[5s])", "legendFormat": "Frames returned/s", "refId": "A"}],
+      "title": "UMEM Fill-Ring Frame Reclamation",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "moe-prometheus"},
+      "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
+      "gridPos": {"h": 6, "w": 12, "x": 0, "y": 16},
+      "id": 5,
+      "targets": [
+        {"expr": "rate(moe_processed_jobs_total[5s])", "legendFormat": "Jobs/s", "refId": "A"},
+        {"expr": "rate(moe_execution_errors_total[5s])", "legendFormat": "Execution errors/s", "refId": "B"},
+        {"expr": "rate(moe_invalid_packets_total[5s])", "legendFormat": "Invalid packets/s", "refId": "C"}
+      ],
+      "title": "Worker Outcomes",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "1s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["moe", "af_xdp", "ebpf", "telemetry"],
+  "templating": {"list": []},
+  "time": {"from": "now-5m", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "AF_XDP Mixture-of-Experts Kernel Bypass Telemetry",
+  "uid": "afxdp-moe-telemetry",
+  "version": 1,
+  "weekStart": ""
+}

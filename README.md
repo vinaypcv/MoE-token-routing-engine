@@ -54,10 +54,11 @@ Import [docs/grafana/moe-af-xdp-dashboard.json](docs/grafana/moe-af-xdp-dashboar
 For the complete local Phase 2 preview (Prometheus, Grafana, UDP receiver, and uniform/skewed traffic phases), start Docker and run:
 
 ```bash
-bash scripts/run_traffic_storm_demo.sh
+sudo apt-get install -y clang llvm m4 libelf-dev zlib1g-dev
+bash dashboards/run_traffic_storm_demo.sh
 ```
 
-The script builds the required Rust binaries, starts UDP-driven simulated worker telemetry plus Prometheus/Grafana, and runs uniform and hot-expert traffic phases. It prints the URLs and cleanup commands. Queue service is simulated; this preview does not attach XDP or measure NIC/AF_XDP zero-copy performance.
+The script builds the required Rust binaries, starts UDP-driven simulated worker telemetry plus Prometheus/Grafana, and runs uniform and hot-expert traffic phases. It prints the URLs and cleanup commands. For Docker Desktop to scrape the host, the script binds metrics to `0.0.0.0:9100`; keep that port firewalled to trusted local/demo traffic. Queue service is simulated; this preview does not attach XDP or measure NIC/AF_XDP zero-copy performance.
 
 See [docs/ARCHITECTURE_EBPF_AF_XDP.md](docs/ARCHITECTURE_EBPF_AF_XDP.md) for the XDP parser, verifier, UMEM, and ring ownership specification.
 

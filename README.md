@@ -35,15 +35,19 @@ cargo run --release --bin bench_ingestion -- 127.0.0.1:9000 3
 
 To listen for an external UDP generator instead, append `--external`. This measures the normal UDP socket path, not AF_XDP; see [docs/ARCHITECTURE_EBPF_AF_XDP.md](docs/ARCHITECTURE_EBPF_AF_XDP.md) for the AF_XDP measurement caveats.
 
-Generate batched UDP token-header traffic with configurable workers, distribution, duration, and optional aggregate packet-rate limit:
+Generate batched UDP token traffic with a token header followed by deterministic feature bytes. Arguments configure workers, distribution, duration, rate limit, and feature length:
 
 ```bash
-cargo run --release --bin traffic_profiler -- 127.0.0.1:9000 4 5 8 skewed 70 0
+cargo run --release --bin traffic_profiler -- 127.0.0.1:9000 4 5 8 skewed 70 0 256
 ```
 
-This sends UDP payloads for socket-path testing; it does not create Ethernet frames or guarantee traffic reaches an AF_XDP-capable NIC queue.
+This sends UDP application payloads for socket-path testing; the operating system supplies the Ethernet/IP/UDP headers. It does not generate raw Ethernet frames or guarantee traffic reaches an AF_XDP-capable NIC queue.
 
-The profiler arguments are `<target-addr> <threads> [seconds] [experts] [uniform|skewed] [hot-percent] [total-pps]`. Use `total-pps` of `0` for unpaced sending.
+The profiler arguments are `<target-addr> <threads> [seconds] [experts] [uniform|skewed] [hot-percent] [total-pps] [feature-bytes]`. Use `total-pps` of `0` for unpaced sending; feature bytes default to 256.
+
+When `xdp_loader` is attached, it starts a Prometheus text endpoint at `http://127.0.0.1:9100/metrics`; set `MOE_METRICS_ADDR` to override the bind address. The default expert worker currently runs a small synchronous linear-model placeholder over feature bytes following the 10-byte token header. Packets containing only the header are reported as execution errors; replace the model implementation when defining the production tensor payload format.
+
+Import [docs/grafana/moe-af-xdp-dashboard.json](docs/grafana/moe-af-xdp-dashboard.json) into Grafana and select the Prometheus source scraping `/metrics`. The endpoint binds to loopback by default; to scrape from a separate host or container, set `MOE_METRICS_ADDR=0.0.0.0:9100` and restrict network access appropriately.
 
 See [docs/ARCHITECTURE_EBPF_AF_XDP.md](docs/ARCHITECTURE_EBPF_AF_XDP.md) for the XDP parser, verifier, UMEM, and ring ownership specification.
 

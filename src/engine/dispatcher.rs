@@ -3,7 +3,7 @@ use std::sync::atomic::Ordering;
 use crossbeam_channel::{Sender, TrySendError};
 use xsk_rs::FrameDesc;
 
-use super::backpressure::SystemMetrics;
+use super::telemetry::{PipelineTelemetry, EXPERT_METRIC_COUNT};
 
 const ETH_HEADER_LEN: usize = 14;
 const IPV4_MIN_HEADER_LEN: usize = 20;
@@ -32,6 +32,7 @@ pub struct ParsedToken {
     pub token_id: u64,
     pub expert_id: u8,
     pub payload_offset: usize,
+    pub feature_length: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -40,17 +41,18 @@ pub struct TokenJob {
     pub expert_id: u8,
     pub frame: FrameDesc,
     pub payload_offset: usize,
+    pub feature_length: usize,
 }
 
 pub struct EngineDispatcher {
     expert_senders: Vec<Sender<TokenJob>>,
-    metrics: std::sync::Arc<SystemMetrics>,
+    metrics: std::sync::Arc<PipelineTelemetry>,
 }
 
 impl EngineDispatcher {
     pub fn new(
         expert_senders: Vec<Sender<TokenJob>>,
-        metrics: std::sync::Arc<SystemMetrics>,
+        metrics: std::sync::Arc<PipelineTelemetry>,
     ) -> Self {
         Self {
             expert_senders,
@@ -143,11 +145,13 @@ impl EngineDispatcher {
                 .map_err(|_| FrameDropReason::Truncated)?,
         );
         let expert_id = frame[payload_offset + 9];
+        let feature_length = udp_total_len - UDP_HEADER_LEN - TOKEN_HEADER_LEN;
 
         Ok(ParsedToken {
             token_id,
             expert_id,
             payload_offset,
+            feature_length,
         })
     }
 
@@ -156,17 +160,23 @@ impl EngineDispatcher {
         frame_desc: FrameDesc,
         frame_bytes: &[u8],
     ) -> Result<ParsedToken, (FrameDesc, FrameDropReason)> {
-        self.metrics.total_rx.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .rx_packets_total
+            .fetch_add(1, Ordering::Relaxed);
         let parsed = match Self::parse_frame(frame_bytes) {
             Ok(parsed) => parsed,
             Err(reason) => {
-                self.metrics.invalid_packets.fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .invalid_packets_total
+                    .fetch_add(1, Ordering::Relaxed);
                 return Err((frame_desc, reason));
             }
         };
 
         let Some(sender) = self.expert_senders.get(parsed.expert_id as usize) else {
-            self.metrics.invalid_packets.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .invalid_packets_total
+                .fetch_add(1, Ordering::Relaxed);
             return Err((frame_desc, FrameDropReason::UnknownExpert));
         };
 
@@ -175,19 +185,40 @@ impl EngineDispatcher {
             expert_id: parsed.expert_id,
             frame: frame_desc,
             payload_offset: parsed.payload_offset,
+            feature_length: parsed.feature_length,
         };
+        let expert_id = usize::from(parsed.expert_id);
+        if expert_id < EXPERT_METRIC_COUNT {
+            self.metrics.expert_queue_depth[expert_id].fetch_add(1, Ordering::Relaxed);
+        }
         match sender.try_send(job) {
             Ok(()) => {
-                self.metrics.dispatched.fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .dispatched_total
+                    .fetch_add(1, Ordering::Relaxed);
+                if expert_id < EXPERT_METRIC_COUNT {
+                    self.metrics.expert_dispatched[expert_id].fetch_add(1, Ordering::Relaxed);
+                }
                 Ok(parsed)
             }
             Err(TrySendError::Full(job)) => {
-                self.metrics.saturated_drops.fetch_add(1, Ordering::Relaxed);
+                if expert_id < EXPERT_METRIC_COUNT {
+                    self.metrics.expert_queue_depth[expert_id].fetch_sub(1, Ordering::Relaxed);
+                }
+                self.metrics
+                    .saturated_drops_total
+                    .fetch_add(1, Ordering::Relaxed);
+                if expert_id < EXPERT_METRIC_COUNT {
+                    self.metrics.expert_drops[expert_id].fetch_add(1, Ordering::Relaxed);
+                }
                 Err((job.frame, FrameDropReason::QueueFull))
             }
             Err(TrySendError::Disconnected(job)) => {
+                if expert_id < EXPERT_METRIC_COUNT {
+                    self.metrics.expert_queue_depth[expert_id].fetch_sub(1, Ordering::Relaxed);
+                }
                 self.metrics
-                    .closed_queue_drops
+                    .closed_queue_drops_total
                     .fetch_add(1, Ordering::Relaxed);
                 Err((job.frame, FrameDropReason::QueueClosed))
             }
@@ -198,6 +229,7 @@ impl EngineDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::telemetry::PipelineTelemetry;
     use crossbeam_channel::bounded;
 
     fn token_frame(expert: u8) -> Vec<u8> {
@@ -218,7 +250,6 @@ mod tests {
         frame[token_offset + 9] = expert;
         frame
     }
-
     #[test]
     fn parser_handles_token_and_variable_ipv4_ihl() {
         let mut frame = token_frame(2);
@@ -235,6 +266,7 @@ mod tests {
         let parsed = EngineDispatcher::parse_frame(&frame).unwrap();
         assert_eq!(parsed.token_id, 42);
         assert_eq!(parsed.expert_id, 2);
+        assert_eq!(parsed.feature_length, 0);
         assert_eq!(
             parsed.payload_offset,
             ETH_HEADER_LEN + IPV4_MIN_HEADER_LEN + 4 + UDP_HEADER_LEN
@@ -242,9 +274,25 @@ mod tests {
     }
 
     #[test]
+    fn parser_reports_declared_feature_payload_length() {
+        let feature_bytes = [0x12, 0x34, 0x56, 0x78];
+        let mut frame = token_frame(1);
+        frame.extend_from_slice(&feature_bytes);
+        let ip_len =
+            (IPV4_MIN_HEADER_LEN + UDP_HEADER_LEN + TOKEN_HEADER_LEN + feature_bytes.len()) as u16;
+        frame[ETH_HEADER_LEN + 2..ETH_HEADER_LEN + 4].copy_from_slice(&ip_len.to_be_bytes());
+        let udp_offset = ETH_HEADER_LEN + IPV4_MIN_HEADER_LEN;
+        let udp_len = (UDP_HEADER_LEN + TOKEN_HEADER_LEN + feature_bytes.len()) as u16;
+        frame[udp_offset + 4..udp_offset + 6].copy_from_slice(&udp_len.to_be_bytes());
+
+        let parsed = EngineDispatcher::parse_frame(&frame).unwrap();
+        assert_eq!(parsed.feature_length, feature_bytes.len());
+    }
+
+    #[test]
     fn full_expert_queue_returns_frame_for_recycling() {
         let (sender, _receiver) = bounded(1);
-        let metrics = std::sync::Arc::new(SystemMetrics::default());
+        let metrics = std::sync::Arc::new(PipelineTelemetry::default());
         let dispatcher = EngineDispatcher::new(vec![sender.clone()], metrics.clone());
         let frame = token_frame(0);
         dispatcher
@@ -254,7 +302,7 @@ mod tests {
             .dispatch_frame(FrameDesc::default(), &frame)
             .unwrap_err();
         assert_eq!(rejected.1, FrameDropReason::QueueFull);
-        assert_eq!(metrics.saturated_drops.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.saturated_drops_total.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -271,7 +319,7 @@ mod tests {
     fn hot_expert_saturation_does_not_block_other_expert_queue() {
         let (hot_sender, _hot_receiver) = bounded(1);
         let (other_sender, other_receiver) = bounded(1);
-        let metrics = std::sync::Arc::new(SystemMetrics::default());
+        let metrics = std::sync::Arc::new(PipelineTelemetry::default());
         let dispatcher = EngineDispatcher::new(vec![hot_sender, other_sender], metrics.clone());
         let hot_frame = token_frame(0);
         let other_frame = token_frame(1);
@@ -291,7 +339,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(other_receiver.len(), 1);
-        assert_eq!(metrics.saturated_drops.load(Ordering::Relaxed), 1);
-        assert_eq!(metrics.dispatched.load(Ordering::Relaxed), 2);
+        assert_eq!(metrics.saturated_drops_total.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.dispatched_total.load(Ordering::Relaxed), 2);
     }
 }

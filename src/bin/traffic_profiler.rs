@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 const BATCH_SIZE: usize = 64;
 const TOKEN_HEADER_SIZE: usize = 10;
+const MAX_UDP_PAYLOAD_SIZE: usize = 65_507;
 
 #[derive(Clone, Copy)]
 enum Distribution {
@@ -16,6 +17,17 @@ enum Distribution {
 struct WorkerResult {
     packets: u64,
     bytes: u64,
+}
+
+struct WorkerConfig {
+    worker_id: usize,
+    target: String,
+    duration: Duration,
+    expert_count: u8,
+    distribution: Distribution,
+    worker_pps: Option<u64>,
+    feature_bytes: usize,
+    core: Option<core_affinity::CoreId>,
 }
 
 #[cfg(target_os = "linux")]
@@ -60,24 +72,20 @@ fn generate_expert(distribution: Distribution, sequence: u64, expert_count: u8) 
     }
 }
 
-fn run_worker(
-    worker_id: usize,
-    target: String,
-    duration: Duration,
-    expert_count: u8,
-    distribution: Distribution,
-    worker_pps: Option<u64>,
-    core: Option<core_affinity::CoreId>,
-) -> io::Result<WorkerResult> {
+fn run_worker(config: WorkerConfig) -> io::Result<WorkerResult> {
     let socket = UdpSocket::bind("0.0.0.0:0")?;
-    socket.connect(target)?;
-    if let Some(core) = core {
+    socket.connect(config.target)?;
+    if let Some(core) = config.core {
         if !core_affinity::set_for_current(core) {
-            eprintln!("Worker {worker_id} could not pin to CPU core {}", core.id);
+            eprintln!(
+                "Worker {} could not pin to CPU core {}",
+                config.worker_id, core.id
+            );
         }
     }
 
-    let mut payloads = [[0u8; TOKEN_HEADER_SIZE]; BATCH_SIZE];
+    let packet_size = TOKEN_HEADER_SIZE + config.feature_bytes;
+    let mut payloads: Vec<Vec<u8>> = (0..BATCH_SIZE).map(|_| vec![0u8; packet_size]).collect();
     let mut vectors: Vec<libc::iovec> = payloads
         .iter_mut()
         .map(|payload| libc::iovec {
@@ -104,26 +112,32 @@ fn run_worker(
     let started_at = Instant::now();
     let mut packet_count = 0u64;
     let mut bytes_count = 0u64;
-    let sequence_base = (worker_id as u64) << 48;
+    let sequence_base = (config.worker_id as u64) << 48;
 
-    if worker_pps == Some(0) {
+    if config.worker_pps == Some(0) {
         return Ok(WorkerResult {
             packets: 0,
             bytes: 0,
         });
     }
 
-    while started_at.elapsed() < duration {
+    while started_at.elapsed() < config.duration {
         for index in 0..BATCH_SIZE {
             let sequence = sequence_base + packet_count + index as u64 + 1;
             payloads[index][0] = 0x77;
             payloads[index][1..9].copy_from_slice(&sequence.to_be_bytes());
-            payloads[index][9] = generate_expert(distribution, sequence, expert_count);
+            payloads[index][9] =
+                generate_expert(config.distribution, sequence, config.expert_count);
+            for (feature_index, activation) in
+                payloads[index][TOKEN_HEADER_SIZE..].iter_mut().enumerate()
+            {
+                *activation = sequence.wrapping_add(feature_index as u64) as u8;
+            }
             messages[index].msg_len = 0;
         }
 
         let mut batch_offset = 0;
-        while batch_offset < BATCH_SIZE && started_at.elapsed() < duration {
+        while batch_offset < BATCH_SIZE && started_at.elapsed() < config.duration {
             let sent = send_messages(&socket, &mut messages[batch_offset..])?;
             if sent == 0 {
                 thread::yield_now();
@@ -131,10 +145,10 @@ fn run_worker(
             }
             batch_offset += sent;
             packet_count += sent as u64;
-            bytes_count += (sent * TOKEN_HEADER_SIZE) as u64;
+            bytes_count += (sent * packet_size) as u64;
         }
 
-        if let Some(worker_pps) = worker_pps {
+        if let Some(worker_pps) = config.worker_pps {
             let target_elapsed = Duration::from_secs_f64(packet_count as f64 / worker_pps as f64);
             if let Some(wait) = target_elapsed.checked_sub(started_at.elapsed()) {
                 thread::sleep(wait);
@@ -166,7 +180,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let arguments: Vec<String> = env::args().skip(1).collect();
         if arguments.len() < 2 {
-            return Err("usage: traffic_profiler <target-addr> <threads> [seconds] [experts] [uniform|skewed] [hot-percent] [total-pps]".into());
+            return Err("usage: traffic_profiler <target-addr> <threads> [seconds] [experts] [uniform|skewed] [hot-percent] [total-pps] [feature-bytes]".into());
         }
 
         let target = arguments[0].clone();
@@ -176,10 +190,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let strategy = arguments.get(4).map(String::as_str).unwrap_or("skewed");
         let hot_percent: u8 = parse(arguments.get(5), 70, "hot percentage")?;
         let total_pps: u64 = parse(arguments.get(6), 0, "packet rate")?;
+        let feature_bytes: usize = parse(arguments.get(7), 256, "feature byte count")?;
 
-        if worker_count == 0 || seconds == 0 || expert_count == 0 || hot_percent > 100 {
+        if worker_count == 0
+            || seconds == 0
+            || expert_count == 0
+            || hot_percent > 100
+            || TOKEN_HEADER_SIZE + feature_bytes > MAX_UDP_PAYLOAD_SIZE
+        {
             return Err(
-                "threads, seconds, and experts must be positive; hot percentage must be 0..=100"
+                "threads, seconds, and experts must be positive; hot percentage must be 0..=100; UDP payload must fit the IPv4 datagram limit"
                     .into(),
             );
         }
@@ -194,7 +214,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let cores = core_affinity::get_core_ids().unwrap_or_default();
         println!(
-            "Generating {strategy} UDP token traffic to {target} with {worker_count} workers for {seconds}s"
+            "Generating {strategy} UDP tokens ({feature_bytes} feature bytes each) to {target} with {worker_count} workers for {seconds}s"
         );
         println!(
             "Rate limit: {}",
@@ -220,15 +240,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             handles.push(thread::spawn({
                 let target = target.clone();
                 move || {
-                    run_worker(
+                    run_worker(WorkerConfig {
                         worker_id,
                         target,
                         duration,
                         expert_count,
                         distribution,
                         worker_pps,
+                        feature_bytes,
                         core,
-                    )
+                    })
                 }
             }));
         }

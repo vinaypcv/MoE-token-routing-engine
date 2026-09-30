@@ -1,6 +1,5 @@
-use std::hint::black_box;
 use std::io;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
@@ -9,43 +8,36 @@ use xsk_rs::umem::Umem;
 use xsk_rs::FrameDesc;
 
 use super::dispatcher::{EngineDispatcher, TokenJob};
+use super::telemetry::{PipelineTelemetry, EXPERT_METRIC_COUNT};
+use super::worker::{spawn_expert_worker, ExpertModel, LinearExpertModel};
 
 pub const DEFAULT_EXPERT_QUEUE_CAPACITY: usize = 1024;
 pub const DEFAULT_EXPERT_COUNT: usize = 8;
 
-#[derive(Default)]
-pub struct SystemMetrics {
-    pub total_rx: AtomicU64,
-    pub dispatched: AtomicU64,
-    pub processed: AtomicU64,
-    pub saturated_drops: AtomicU64,
-    pub invalid_packets: AtomicU64,
-    pub closed_queue_drops: AtomicU64,
-    pub recycle_failures: AtomicU64,
-}
+pub type SystemMetrics = PipelineTelemetry;
 
-struct FrameRecycler {
+pub(crate) struct FrameRecycler {
     sender: Sender<FrameDesc>,
     metrics: Arc<SystemMetrics>,
 }
 
 impl FrameRecycler {
-    fn recycle(&self, frame: FrameDesc) {
+    pub(crate) fn recycle(&self, frame: FrameDesc) {
         if self.sender.send(frame).is_err() {
             self.metrics
-                .recycle_failures
+                .recycle_failures_total
                 .fetch_add(1, Ordering::Relaxed);
         }
     }
 }
 
-struct FrameGuard {
+pub(crate) struct FrameGuard {
     frame: Option<FrameDesc>,
     recycler: Arc<FrameRecycler>,
 }
 
 impl FrameGuard {
-    fn new(frame: FrameDesc, recycler: Arc<FrameRecycler>) -> Self {
+    pub(crate) fn new(frame: FrameDesc, recycler: Arc<FrameRecycler>) -> Self {
         Self {
             frame: Some(frame),
             recycler,
@@ -76,10 +68,14 @@ impl BackpressureRouter {
         queue_capacity: usize,
         frame_pool_capacity: usize,
     ) -> io::Result<Self> {
-        if expert_count == 0 || queue_capacity == 0 || frame_pool_capacity == 0 {
+        if expert_count == 0
+            || expert_count > EXPERT_METRIC_COUNT
+            || queue_capacity == 0
+            || frame_pool_capacity == 0
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "expert count, queue capacity, and frame pool capacity must be non-zero",
+                "expert count must be 1..=8 and queue/frame capacities must be non-zero",
             ));
         }
 
@@ -95,28 +91,16 @@ impl BackpressureRouter {
         for expert_id in 0..expert_count {
             let (job_sender, job_receiver) = bounded::<TokenJob>(queue_capacity);
             expert_senders.push(job_sender);
-            let worker_umem = umem.clone();
             let worker_recycler = Arc::clone(&recycler);
-            let worker_metrics = Arc::clone(&metrics);
-            let worker = thread::Builder::new()
-                .name(format!("expert-{expert_id}"))
-                .spawn(move || {
-                    while let Ok(job) = job_receiver.recv() {
-                        let _frame_guard = FrameGuard::new(job.frame, Arc::clone(&worker_recycler));
-                        let payload_marker = unsafe {
-                            worker_umem
-                                .data(&job.frame)
-                                .contents()
-                                .get(job.payload_offset)
-                                .copied()
-                        };
-
-                        if payload_marker == Some(0x77) {
-                            black_box((job.token_id, job.expert_id));
-                            worker_metrics.processed.fetch_add(1, Ordering::Relaxed);
-                        }
-                    }
-                })?;
+            let worker_model: Arc<dyn ExpertModel> =
+                Arc::new(LinearExpertModel::new(expert_id as u8, 256));
+            let worker = spawn_expert_worker(
+                worker_model,
+                job_receiver,
+                umem.clone(),
+                worker_recycler,
+                Arc::clone(&metrics),
+            )?;
             workers.push(worker);
         }
 
@@ -172,7 +156,7 @@ impl BackpressureRouter {
                 if worker.is_finished() {
                     if worker.join().is_err() {
                         self.metrics
-                            .recycle_failures
+                            .recycle_failures_total
                             .fetch_add(1, Ordering::Relaxed);
                     }
                 } else {

@@ -4,6 +4,7 @@ use aya::Bpf;
 use moe_holistic_engine::engine::backpressure::{
     BackpressureRouter, DEFAULT_EXPERT_COUNT, DEFAULT_EXPERT_QUEUE_CAPACITY,
 };
+use moe_holistic_engine::engine::telemetry::TelemetryServer;
 use std::env;
 use std::error::Error;
 use std::num::NonZeroU32;
@@ -108,10 +109,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
         UMEM_FRAME_COUNT as usize,
     )?;
     let metrics = router.metrics();
+    metrics.record_recycled(seeded_frames as u64);
+
+    let metrics_address: std::net::SocketAddr = env::var("MOE_METRICS_ADDR")
+        .unwrap_or_else(|_| "127.0.0.1:9100".to_owned())
+        .parse()?;
+    let telemetry = Arc::clone(&metrics);
+    let telemetry_task = tokio::spawn(async move {
+        if let Err(error) = TelemetryServer::run(metrics_address, telemetry).await {
+            eprintln!("Prometheus metrics server stopped: {error}");
+        }
+    });
 
     let running = Arc::new(AtomicBool::new(true));
     let receiver_running = Arc::clone(&running);
     let receiver_umem = umem.clone();
+    let receiver_metrics = Arc::clone(&metrics);
     let receiver = thread::spawn(move || -> std::io::Result<()> {
         let mut descriptors = vec![xsk_rs::FrameDesc::default(); RX_BATCH_SIZE];
         let mut fill_batch = [xsk_rs::FrameDesc::default(); FILL_BATCH_SIZE];
@@ -134,6 +147,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         100,
                     )?
                 };
+                receiver_metrics.record_recycled(submitted as u64);
                 for descriptor in fill_batch.iter().take(batch_len).skip(submitted) {
                     free_frames.push(*descriptor);
                 }
@@ -169,22 +183,32 @@ async fn main() -> Result<(), Box<dyn Error>> {
     tokio::signal::ctrl_c().await?;
     running.store(false, Ordering::Release);
     program.detach(link_id)?;
+    telemetry_task.abort();
     receiver
         .join()
         .map_err(|_| std::io::Error::other("AF_XDP receive thread panicked"))??;
     drop(bpf);
     drop((tx_queue, completion_queue, umem));
     println!("Detached XDP program.");
-    println!("Received: {}", metrics.total_rx.load(Ordering::Relaxed));
-    println!("Dispatched: {}", metrics.dispatched.load(Ordering::Relaxed));
-    println!("Processed: {}", metrics.processed.load(Ordering::Relaxed));
+    println!(
+        "Received: {}",
+        metrics.rx_packets_total.load(Ordering::Relaxed)
+    );
+    println!(
+        "Dispatched: {}",
+        metrics.dispatched_total.load(Ordering::Relaxed)
+    );
+    println!(
+        "Processed: {}",
+        metrics.processed_jobs.load(Ordering::Relaxed)
+    );
     println!(
         "Saturated drops: {}",
-        metrics.saturated_drops.load(Ordering::Relaxed)
+        metrics.saturated_drops_total.load(Ordering::Relaxed)
     );
     println!(
         "Invalid packets: {}",
-        metrics.invalid_packets.load(Ordering::Relaxed)
+        metrics.invalid_packets_total.load(Ordering::Relaxed)
     );
     Ok(())
 }

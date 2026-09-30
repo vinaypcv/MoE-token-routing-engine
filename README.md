@@ -27,6 +27,16 @@ cargo bench --bench holistic_benchmarks
 
 The benchmark reports measured-phase throughput and total datagrams sent and received, including warmup sweeps.
 
+For a Linux `recvmmsg` ingestion baseline with a loopback packet generator:
+
+```bash
+cargo run --release --bin bench_ingestion -- 127.0.0.1:9000 3
+```
+
+To listen for an external UDP generator instead, append `--external`. This measures the normal UDP socket path, not AF_XDP; see [docs/ARCHITECTURE_EBPF_AF_XDP.md](docs/ARCHITECTURE_EBPF_AF_XDP.md) for the AF_XDP measurement caveats.
+
+See [docs/ARCHITECTURE_EBPF_AF_XDP.md](docs/ARCHITECTURE_EBPF_AF_XDP.md) for the XDP parser, verifier, UMEM, and ring ownership specification.
+
 ## Speculative routing prototype
 
 Run the experimental prediction/validation state-machine simulation with:

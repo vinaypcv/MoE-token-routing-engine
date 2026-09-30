@@ -34,6 +34,10 @@ xsk-rs = { version = "0.11.0", features = ["use_cc_build"] }
 name = "xdp_loader"
 path = "src/bin/xdp_loader.rs"
 
+[[bin]]
+name = "bench_ingestion"
+path = "src/bin/bench_ingestion.rs"
+
 [workspace]
 members = [".", "moe-ebpf-kernel"]
 default-members = ["."]

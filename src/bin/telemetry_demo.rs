@@ -95,7 +95,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ).max(queue_capacity / 2),
                     _ => queue_capacity,
                 };
-                let admitted = depth.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                let admitted = depth.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                     (current < admission_limit).then_some(current + 1)
                 });
                 if admitted.is_ok() {

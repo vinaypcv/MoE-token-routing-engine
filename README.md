@@ -41,7 +41,7 @@ The current repository validates:
   - `sequence_id: u32` big-endian
 - Bounded expert queues with explicit drop reasons and fallback routing policy.
 - Runtime-detected AVX2 quantization with scalar fallback.
-- Allocation-free NACK frame formatting and a tested `xsk-rs` TX/completion-ring adapter. The adapter is not active retransmission in the live receiver loop.
+- Sequence-gap detection in the AF_XDP receive loop, allocation-free NACK frame formatting, and opt-in `xsk-rs` TX/completion-ring submission using reserved UMEM frames. Configure peer/interface addresses to enable TX. This emits NACK datagrams; reliable retransmission still requires a cooperating sender and retry protocol.
 - Prometheus/Grafana dashboards, SLO alerts, benchmark metadata, and fault-recovery smoke tests.
 
 Representative local quantization output varies by host. Recent runs measured roughly 2.7M FP32 samples/s and 2.4M AVX2 INT8 samples/s with sub-microsecond p99 latency. The INT8 path trades CPU work for a smaller representation; it is not claimed to be faster than the FP32 baseline.
@@ -186,6 +186,20 @@ export MOE_METRICS_ADDR=127.0.0.1:9100
 ```
 
 The loader explicitly requests `XDP_ZEROCOPY` and fails rather than silently falling back. WSL loopback and virtual interfaces do not satisfy the zero-copy validation gate.
+
+To enable NACK transmission, configure the local interface and peer endpoints before starting the loader:
+
+```bash
+export MOE_NACK_TX_ENABLED=true
+export MOE_NACK_SOURCE_MAC=02:00:00:00:00:01
+export MOE_NACK_DESTINATION_MAC=02:00:00:00:00:02
+export MOE_NACK_SOURCE_IP=192.0.2.10
+export MOE_NACK_DESTINATION_IP=192.0.2.20
+export MOE_NACK_SOURCE_PORT=9000
+export MOE_NACK_DESTINATION_PORT=9001
+```
+
+Replace the documentation-only addresses with actual test-interface and peer values. The loader reserves 64 UMEM frames for TX and counts submitted versus unavailable NACK frames. Verify `moe_nack_requests_total`, `moe_nack_tx_sent_total`, and `moe_nack_tx_unavailable_total`. A sender must implement the matching NACK protocol and retain packets for retries; frame transmission alone does not provide reliable delivery.
 
 Use [docs/AF_XDP_VALIDATION_RUNBOOK.md](docs/AF_XDP_VALIDATION_RUNBOOK.md) for kernel, driver, NIC counter, packet-accounting, rollback, and evidence requirements.
 

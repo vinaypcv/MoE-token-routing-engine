@@ -375,6 +375,10 @@ mod tests {
     use crossbeam_channel::bounded;
 
     fn token_frame(expert: u8) -> Vec<u8> {
+        token_frame_with_sequence(expert, 1)
+    }
+
+    fn token_frame_with_sequence(expert: u8, sequence_id: u32) -> Vec<u8> {
         let mut frame =
             vec![0u8; ETH_HEADER_LEN + IPV4_MIN_HEADER_LEN + UDP_HEADER_LEN + TOKEN_HEADER_LEN];
         frame[12..14].copy_from_slice(&IPV4_ETHERTYPE.to_be_bytes());
@@ -390,7 +394,7 @@ mod tests {
         frame[token_offset] = TOKEN_MAGIC;
         frame[token_offset + 1..token_offset + 9].copy_from_slice(&42u64.to_be_bytes());
         frame[token_offset + 9] = expert;
-        frame[token_offset + 10..token_offset + 14].copy_from_slice(&1u32.to_be_bytes());
+        frame[token_offset + 10..token_offset + 14].copy_from_slice(&sequence_id.to_be_bytes());
         frame
     }
     #[test]
@@ -409,11 +413,27 @@ mod tests {
         let parsed = EngineDispatcher::parse_frame(&frame).unwrap();
         assert_eq!(parsed.token_id, 42);
         assert_eq!(parsed.expert_id, 2);
+        assert_eq!(parsed.sequence_id, 1);
         assert_eq!(parsed.feature_length, 0);
         assert_eq!(
             parsed.payload_offset,
             ETH_HEADER_LEN + IPV4_MIN_HEADER_LEN + 4 + UDP_HEADER_LEN
         );
+    }
+
+    #[test]
+    fn dispatch_records_sequence_gap_for_nack_handling() {
+        let (sender, _receiver) = bounded(4);
+        let metrics = std::sync::Arc::new(PipelineTelemetry::default());
+        let dispatcher = EngineDispatcher::new(vec![sender], metrics.clone());
+        dispatcher
+            .dispatch_frame(FrameDesc::default(), &token_frame_with_sequence(0, 40))
+            .unwrap();
+        dispatcher
+            .dispatch_frame(FrameDesc::default(), &token_frame_with_sequence(0, 43))
+            .unwrap();
+
+        assert_eq!(metrics.nack_requests_total.load(Ordering::Relaxed), 1);
     }
 
     #[test]

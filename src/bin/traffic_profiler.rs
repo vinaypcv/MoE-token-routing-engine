@@ -1,6 +1,8 @@
 use std::env;
 use std::io;
 use std::net::UdpSocket;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -28,6 +30,8 @@ struct WorkerConfig {
     worker_pps: Option<u64>,
     feature_bytes: usize,
     core: Option<core_affinity::CoreId>,
+    expert_sequences: Arc<[AtomicU32; 8]>,
+    ordered_batch_lock: Arc<Mutex<()>>,
 }
 
 #[cfg(target_os = "linux")]
@@ -122,13 +126,21 @@ fn run_worker(config: WorkerConfig) -> io::Result<WorkerResult> {
     }
 
     while started_at.elapsed() < config.duration {
+        let _sequence_order = config
+            .ordered_batch_lock
+            .lock()
+            .map_err(|_| io::Error::other("sequence ordering lock poisoned"))?;
         for index in 0..BATCH_SIZE {
             let sequence = sequence_base + packet_count + index as u64 + 1;
             payloads[index][0] = 0x77;
             payloads[index][1..9].copy_from_slice(&sequence.to_be_bytes());
             payloads[index][9] =
                 generate_expert(config.distribution, sequence, config.expert_count);
-            payloads[index][10..14].copy_from_slice(&(sequence as u32).to_be_bytes());
+            let expert_id = payloads[index][9] as usize;
+            let sequence_id = config.expert_sequences[expert_id]
+                .fetch_add(1, Ordering::Relaxed)
+                .wrapping_add(1);
+            payloads[index][10..14].copy_from_slice(&sequence_id.to_be_bytes());
             for (feature_index, activation) in
                 payloads[index][TOKEN_HEADER_SIZE..].iter_mut().enumerate()
             {
@@ -138,7 +150,7 @@ fn run_worker(config: WorkerConfig) -> io::Result<WorkerResult> {
         }
 
         let mut batch_offset = 0;
-        while batch_offset < BATCH_SIZE && started_at.elapsed() < config.duration {
+        while batch_offset < BATCH_SIZE {
             let sent = send_messages(&socket, &mut messages[batch_offset..])?;
             if sent == 0 {
                 thread::yield_now();
@@ -148,6 +160,7 @@ fn run_worker(config: WorkerConfig) -> io::Result<WorkerResult> {
             packet_count += sent as u64;
             bytes_count += (sent * packet_size) as u64;
         }
+        drop(_sequence_order);
 
         if let Some(worker_pps) = config.worker_pps {
             let target_elapsed = Duration::from_secs_f64(packet_count as f64 / worker_pps as f64);
@@ -196,11 +209,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if worker_count == 0
             || seconds == 0
             || expert_count == 0
+            || expert_count > 8
             || hot_percent > 100
             || TOKEN_HEADER_SIZE + feature_bytes > MAX_UDP_PAYLOAD_SIZE
         {
             return Err(
-                "threads, seconds, and experts must be positive; hot percentage must be 0..=100; UDP payload must fit the IPv4 datagram limit"
+                "threads and seconds must be positive; experts must be 1..=8; hot percentage must be 0..=100; UDP payload must fit the IPv4 datagram limit"
                     .into(),
             );
         }
@@ -227,6 +241,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
 
         let duration = Duration::from_secs(seconds);
+        let expert_sequences = Arc::new(std::array::from_fn(|_| AtomicU32::new(0)));
+        let ordered_batch_lock = Arc::new(Mutex::new(()));
         let mut handles = Vec::with_capacity(worker_count);
         for worker_id in 0..worker_count {
             let core = cores.get(worker_id % cores.len().max(1)).copied();
@@ -240,6 +256,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             handles.push(thread::spawn({
                 let target = target.clone();
+                let expert_sequences = Arc::clone(&expert_sequences);
+                let ordered_batch_lock = Arc::clone(&ordered_batch_lock);
                 move || {
                     run_worker(WorkerConfig {
                         worker_id,
@@ -250,6 +268,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         worker_pps,
                         feature_bytes,
                         core,
+                        expert_sequences,
+                        ordered_batch_lock,
                     })
                 }
             }));

@@ -51,6 +51,7 @@ impl NackTxQueue {
             // and has not been submitted to any ring.
             let mut data = unsafe { self.umem.data_mut(&mut descriptor) };
             let mut cursor = data.cursor();
+            cursor.set_pos(0);
             cursor.write_all(&frame.bytes[..frame.length])?;
         }
 

@@ -53,6 +53,8 @@ Confirm that the loader explicitly reports zero-copy attachment. Generate the sa
 
 The run is valid only when packet accounting agrees across the generator, NIC, XDP/AF_XDP counters, and application metrics within the documented loss budget.
 
+To test the opt-in NACK TX path, set `MOE_NACK_TX_ENABLED=true` and configure `MOE_NACK_SOURCE_MAC`, `MOE_NACK_DESTINATION_MAC`, `MOE_NACK_SOURCE_IP`, `MOE_NACK_DESTINATION_IP`, `MOE_NACK_SOURCE_PORT`, and `MOE_NACK_DESTINATION_PORT` for the test link and cooperating sender. Confirm sequence gaps increment `moe_nack_requests_total`, successful ring submissions increment `moe_nack_tx_sent_total`, and TX exhaustion increments `moe_nack_tx_unavailable_total`. The peer must implement retransmission; the loader only emits requests.
+
 ## Rollback and evidence
 
 Stop the loader with `Ctrl+C`; it detaches the XDP program before exit. Restore the interface configuration and compare post-run NIC counters with the baseline. Store the command line, kernel/driver versions, metrics export, Grafana snapshot, and raw benchmark output together so the result is reproducible.

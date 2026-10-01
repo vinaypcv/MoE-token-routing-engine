@@ -4,11 +4,15 @@ use aya::Bpf;
 use moe_holistic_engine::engine::backpressure::{
     BackpressureRouter, DEFAULT_EXPERT_COUNT, DEFAULT_EXPERT_QUEUE_CAPACITY,
 };
+use moe_holistic_engine::engine::dispatcher::EngineDispatcher;
 use moe_holistic_engine::engine::elastic_quant::ElasticQuantizer;
+use moe_holistic_engine::engine::nack::{NackFrame, SequenceTracker};
+use moe_holistic_engine::engine::nack_tx::NackTxQueue;
 use moe_holistic_engine::engine::predictor::TokenAwarePredictor;
 use moe_holistic_engine::engine::telemetry::TelemetryServer;
 use std::env;
 use std::error::Error;
+use std::net::Ipv4Addr;
 use std::num::NonZeroU32;
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::path::PathBuf;
@@ -27,6 +31,56 @@ const RX_RING_SIZE: u32 = 2048;
 const RX_BATCH_SIZE: usize = 64;
 const XSK_MAP_CAPACITY: u32 = 64;
 const FILL_BATCH_SIZE: usize = 64;
+const NACK_TX_FRAME_COUNT: usize = 64;
+
+#[derive(Clone, Copy)]
+struct NackTxConfig {
+    source_mac: [u8; 6],
+    destination_mac: [u8; 6],
+    source_ip: [u8; 4],
+    destination_ip: [u8; 4],
+    source_port: u16,
+    destination_port: u16,
+}
+
+fn load_nack_tx_config() -> Result<Option<NackTxConfig>, Box<dyn Error>> {
+    let enabled = env::var("MOE_NACK_TX_ENABLED")
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
+        .unwrap_or(false);
+    if !enabled {
+        return Ok(None);
+    }
+
+    let source_mac = parse_mac(&env::var("MOE_NACK_SOURCE_MAC")?)?;
+    let destination_mac = parse_mac(&env::var("MOE_NACK_DESTINATION_MAC")?)?;
+    let source_ip = env::var("MOE_NACK_SOURCE_IP")?
+        .parse::<Ipv4Addr>()?
+        .octets();
+    let destination_ip = env::var("MOE_NACK_DESTINATION_IP")?
+        .parse::<Ipv4Addr>()?
+        .octets();
+    let source_port = env::var("MOE_NACK_SOURCE_PORT")?.parse::<u16>()?;
+    let destination_port = env::var("MOE_NACK_DESTINATION_PORT")?.parse::<u16>()?;
+    Ok(Some(NackTxConfig {
+        source_mac,
+        destination_mac,
+        source_ip,
+        destination_ip,
+        source_port,
+        destination_port,
+    }))
+}
+
+fn parse_mac(value: &str) -> Result<[u8; 6], Box<dyn Error>> {
+    let octets = value
+        .split(':')
+        .map(|part| u8::from_str_radix(part, 16))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mac: [u8; 6] = octets
+        .try_into()
+        .map_err(|_| "MAC address must have six colon-separated octets")?;
+    Ok(mac)
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -45,6 +99,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let object_path = arguments.next().map(PathBuf::from).unwrap_or_else(|| {
         PathBuf::from("target/bpfel-unknown-none/release/libmoe_ebpf_kernel.so")
     });
+    let nack_tx_config = load_nack_tx_config()?;
 
     let mut bpf = Bpf::load_file(&object_path)?;
 
@@ -82,6 +137,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .into());
     }
     free_frames.drain(..seeded_frames);
+    if free_frames.len() <= NACK_TX_FRAME_COUNT {
+        return Err(
+            "UMEM does not have enough free frames after RX fill seeding for the NACK TX reserve"
+                .into(),
+        );
+    }
+    let nack_tx_frames = free_frames.split_off(free_frames.len() - NACK_TX_FRAME_COUNT);
+    let nack_tx = NackTxQueue::new(umem.clone(), tx_queue, completion_queue, nack_tx_frames);
 
     {
         let xsk_map = bpf
@@ -101,6 +164,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let link_id = program.attach(&interface_name, XdpFlags::default())?;
 
     println!("Zero-copy AF_XDP redirect attached to {interface_name}, queue {queue_id}.");
+    if nack_tx_config.is_some() {
+        println!("Sequence-gap NACK TX enabled with configured peer/interface addressing.");
+    } else {
+        println!("Sequence-gap NACK detection enabled; TX is disabled (set MOE_NACK_TX_ENABLED=true and NACK endpoint variables to transmit).");
+    }
     println!("Object: {}", object_path.display());
     println!("Press Ctrl+C to stop receiving and detach.");
 
@@ -154,6 +222,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let receiver = thread::spawn(move || -> std::io::Result<()> {
         let mut descriptors = vec![xsk_rs::FrameDesc::default(); RX_BATCH_SIZE];
         let mut fill_batch = [xsk_rs::FrameDesc::default(); FILL_BATCH_SIZE];
+        let sequence_tracker = SequenceTracker::default();
+        let mut nack_tx = nack_tx;
 
         while receiver_running.load(Ordering::Acquire) {
             let recycle_capacity = UMEM_FRAME_COUNT as usize - free_frames.len();
@@ -184,8 +254,42 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             let received = unsafe { rx_queue.poll_and_consume(&mut descriptors, 25)? };
             for descriptor in descriptors.iter().take(received).copied() {
-                let packet = unsafe { receiver_umem.data(&descriptor) };
-                match router.dispatch_frame(descriptor, packet.contents()) {
+                let nack_request = {
+                    let packet = unsafe { receiver_umem.data(&descriptor) };
+                    EngineDispatcher::parse_frame(packet.contents())
+                        .ok()
+                        .and_then(|parsed| {
+                            sequence_tracker.observe(parsed.expert_id, parsed.sequence_id)
+                        })
+                };
+                if let (Some(request), Some(config)) = (nack_request, nack_tx_config) {
+                    let frame = NackFrame::build(
+                        config.source_mac,
+                        config.destination_mac,
+                        config.source_ip,
+                        config.destination_ip,
+                        config.source_port,
+                        config.destination_port,
+                        request,
+                    );
+                    match nack_tx.send(&frame) {
+                        Ok(true) => {
+                            receiver_metrics
+                                .nack_tx_sent_total
+                                .fetch_add(1, Ordering::Relaxed);
+                        }
+                        Ok(false) | Err(_) => {
+                            receiver_metrics
+                                .nack_tx_unavailable_total
+                                .fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+                let dispatch_result = {
+                    let packet = unsafe { receiver_umem.data(&descriptor) };
+                    router.dispatch_frame(descriptor, packet.contents())
+                };
+                match dispatch_result {
                     Ok(()) => {}
                     Err((rejected_frame, _reason)) => free_frames.push(rejected_frame),
                 }
@@ -202,6 +306,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
 
         free_frames.extend(router.shutdown());
+        free_frames.extend(nack_tx.into_parts().2);
         drop((fill_queue, rx_queue));
         Ok(())
     });
@@ -214,7 +319,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .join()
         .map_err(|_| std::io::Error::other("AF_XDP receive thread panicked"))??;
     drop(bpf);
-    drop((tx_queue, completion_queue, umem));
+    drop(umem);
     println!("Detached XDP program.");
     println!(
         "Received: {}",

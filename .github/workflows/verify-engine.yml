@@ -59,6 +59,9 @@ jobs:
           cp artifacts/traffic-report.json artifacts/traffic-report-metadata.json
           cp /tmp/moe-telemetry.log artifacts/telemetry.log
 
+      - name: Verify UDP-to-Metrics Runtime Path
+        run: bash scripts/telemetry_runtime_smoke.sh
+
       - name: Upload Simulation Evidence
         uses: actions/upload-artifact@v4
         with:

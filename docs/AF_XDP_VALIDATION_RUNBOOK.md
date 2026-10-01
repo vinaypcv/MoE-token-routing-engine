@@ -23,6 +23,8 @@ cargo +nightly-2025-12-01 build -Z build-std=core --release -p moe-ebpf-kernel -
 cargo build --release --bin xdp_loader
 ```
 
+The workspace includes a `no_std` eBPF crate, so do not run `cargo check --workspace` with the host target. Validate host code with `cargo check -p moe_holistic_engine --all-targets --all-features` and build the kernel with the explicit BPF target command above. The UDP-to-metrics smoke test is available with `bash scripts/telemetry_runtime_smoke.sh`; it does not replace the native-NIC AF_XDP run below.
+
 ## Baseline
 
 Run the socket-path baseline first and save its output:

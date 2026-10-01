@@ -40,7 +40,34 @@ For the comparison matrix, run `bash scripts/run_baseline_matrix.sh 30 benchmark
 For the FP32 versus INT8 quantization profile, run `cargo bench --bench quantization_profiles`. It reports throughput and p99 latency for the current owned-buffer quantizer; it is not a claim about in-place VRAM quantization.
 For one-command reviewer verification, run `bash scripts/run_benchmarks.sh`; it executes formatting, clippy, host tests, and the quantization benchmark in sequence.
 
-The `NackTxQueue` adapter uses the real `xsk-rs` TX and completion-ring APIs to submit fixed-size NACK frames from UMEM-owned descriptors. Live loader wiring still requires reserving TX frames and adding a sequence field to the token packet contract; the current 10-byte header has no independent sequence identifier.
+## Local Demonstration Evidence
+
+Run the reviewer suite and quantization profile directly:
+
+```bash
+bash scripts/run_benchmarks.sh
+cargo bench --bench quantization_profiles
+```
+
+Representative local output is approximately 2.7M FP32 samples/s and 2.4M AVX2 INT8 samples/s, both with sub-microsecond p99 latency. Exact values vary by CPU, kernel, and system load; use the command output as the result.
+
+For a live synthetic load-shedding demonstration, use isolated ports:
+
+```bash
+MOE_METRICS_ADDR=127.0.0.1:9112 \
+MOE_DEMO_UDP_ADDR=127.0.0.1:9012 \
+MOE_DEMO_ADAPTIVE_BACKPRESSURE=true \
+MOE_DEMO_LOAD_SHEDDING=expert-aware \
+./target/release/telemetry_demo
+
+./target/release/traffic_profiler 127.0.0.1:9012 4 10 8 uniform 70 40000 256
+./target/release/traffic_profiler 127.0.0.1:9012 4 10 8 skewed 80 40000 256
+curl -s http://127.0.0.1:9112/metrics | grep -E 'moe_(rx_packets_total|drop_reason_total|service_capacity_per_tick)'
+```
+
+This synthetic path demonstrates queue protection, deterministic shedding, adaptive service capacity, and Prometheus telemetry. It does not execute XDP, physical-NIC DMA, or live NACK transmission; `fallback_routed_total` and `nack_requests_total` require the AF_XDP dispatcher path.
+
+The `NackTxQueue` adapter uses the real `xsk-rs` TX and completion-ring APIs to submit fixed-size NACK frames from UMEM-owned descriptors. Token Header v2 is 14 bytes and includes a `sequence_id`; live loader wiring still requires reserving TX frames and connecting detected gaps to the adapter.
 
 To listen for an external UDP generator instead, append `--external`. This measures the normal UDP socket path, not AF_XDP; see [docs/ARCHITECTURE_EBPF_AF_XDP.md](docs/ARCHITECTURE_EBPF_AF_XDP.md) for the AF_XDP measurement caveats.
 
@@ -54,7 +81,7 @@ This sends UDP application payloads for socket-path testing; the operating syste
 
 The profiler arguments are `<target-addr> <threads> [seconds] [experts] [uniform|skewed] [hot-percent] [total-pps] [feature-bytes]`. Use `total-pps` of `0` for unpaced sending; feature bytes default to 256.
 
-When `xdp_loader` is attached, it starts a Prometheus text endpoint at `http://127.0.0.1:9100/metrics`; set `MOE_METRICS_ADDR` to override the bind address. The default expert worker currently runs a small synchronous linear-model placeholder over feature bytes following the 10-byte token header. Packets containing only the header are reported as execution errors; replace the model implementation when defining the production tensor payload format.
+When `xdp_loader` is attached, it starts a Prometheus text endpoint at `http://127.0.0.1:9100/metrics`; set `MOE_METRICS_ADDR` to override the bind address. The default expert worker currently runs a small synchronous linear-model placeholder over feature bytes following the 14-byte Token Header v2. Packets containing only the header are reported as execution errors; replace the model implementation when defining the production tensor payload format.
 
 To preview the live dashboard without an XDP-capable NIC, run `cargo run --release --bin telemetry_demo` and open `http://127.0.0.1:9100/`. This mode counts UDP packets sent to `MOE_DEMO_UDP_ADDR` (default `127.0.0.1:9000`) and simulates bounded per-expert worker service; its counters are not AF_XDP or NIC telemetry. Set `MOE_METRICS_ADDR` to change the dashboard/metrics bind address, `MOE_DEMO_QUEUE_CAPACITY` to adjust simulated queue bounds, and `MOE_DEMO_SERVICE_PER_TICK` to adjust simulated service capacity.
 

@@ -33,6 +33,10 @@ For a Linux `recvmmsg` ingestion baseline with a loopback packet generator:
 cargo run --release --bin bench_ingestion -- 127.0.0.1:9000 3
 ```
 
+For a repeatable uniform-versus-skewed traffic report on Linux, run `bash scripts/run_traffic_benchmark_report.sh 127.0.0.1:9000 4 30 8 40000 256 benchmark-report.csv` while the telemetry demo is listening. The script writes one CSV row per traffic phase plus a companion JSON file containing the Git revision, kernel, timestamp, and run parameters.
+
+For the comparison matrix, run `bash scripts/run_baseline_matrix.sh 30 benchmark-matrix`; it records the standard UDP and simulated phases plus explicit native-NIC gates for AF_XDP copy and zero-copy.
+
 To listen for an external UDP generator instead, append `--external`. This measures the normal UDP socket path, not AF_XDP; see [docs/ARCHITECTURE_EBPF_AF_XDP.md](docs/ARCHITECTURE_EBPF_AF_XDP.md) for the AF_XDP measurement caveats.
 
 Generate batched UDP token traffic with a token header followed by deterministic feature bytes. Arguments configure workers, distribution, duration, rate limit, and feature length:
@@ -49,7 +53,16 @@ When `xdp_loader` is attached, it starts a Prometheus text endpoint at `http://1
 
 To preview the live dashboard without an XDP-capable NIC, run `cargo run --release --bin telemetry_demo` and open `http://127.0.0.1:9100/`. This mode counts UDP packets sent to `MOE_DEMO_UDP_ADDR` (default `127.0.0.1:9000`) and simulates bounded per-expert worker service; its counters are not AF_XDP or NIC telemetry. Set `MOE_METRICS_ADDR` to change the dashboard/metrics bind address, `MOE_DEMO_QUEUE_CAPACITY` to adjust simulated queue bounds, and `MOE_DEMO_SERVICE_PER_TICK` to adjust simulated service capacity.
 
+Set `MOE_DEMO_ADAPTIVE_BACKPRESSURE=true` to let the synthetic service capacity increase near aggregate queue saturation and return toward its configured baseline as queues drain. The current synthetic capacity is exported as `moe_service_capacity_per_tick`.
+Set `MOE_DEMO_LOAD_SHEDDING` to `oldest` (FIFO default), `priority` (reserve capacity for Expert 0), or `expert-aware` (tighten repeatedly dropping expert queues). Each rejection remains visible through `moe_drop_reason_total{reason="queue_full"}`.
+
+For the real AF_XDP loader, set `MOE_ROUTING_TOP_K` above `1` to enable token-aware top-k prediction and `MOE_ROUTING_CONFIDENCE` to reject low-confidence predictions. Prediction, reroute, and low-confidence counters are exported as `moe_predictions_total`, `moe_reroutes_total`, and `moe_low_confidence_predictions_total`.
+
 Import [docs/grafana/moe-af-xdp-dashboard.json](docs/grafana/moe-af-xdp-dashboard.json) into Grafana and select the Prometheus source scraping `/metrics`. The endpoint binds to loopback by default; to scrape from a separate host or container, set `MOE_METRICS_ADDR=0.0.0.0:9100` and restrict network access appropriately.
+
+Open the public dashboard at http://localhost:3000/public-dashboards/151c235a7d814048aae07aa1510b896f.
+Additional public dashboard view: http://localhost:3000/public-dashboards/b459c24ff44a49d48730d311b710d908?from=now-5m&to=now&timezone=browser.
+Recorded simulation snapshot: http://localhost:3000/dashboard/snapshot/3J7xlcnw6d0JY3foK4lojqL4MfiTQfGf (17:42:40-17:47:40 local time; includes latency SLO, phase latency, drop reasons, and routing panels).
 
 For the complete local Phase 2 preview (Prometheus, Grafana, UDP receiver, and uniform/skewed traffic phases), start Docker and run:
 
@@ -61,6 +74,7 @@ bash dashboards/run_traffic_storm_demo.sh
 The script builds the required Rust binaries, starts UDP-driven simulated worker telemetry plus Prometheus/Grafana, and runs uniform and hot-expert traffic phases. It prints the URLs and cleanup commands. For Docker Desktop to scrape the host, the script binds metrics to `0.0.0.0:9100`; keep that port firewalled to trusted local/demo traffic. Queue service is simulated; this preview does not attach XDP or measure NIC/AF_XDP zero-copy performance.
 
 See [docs/ARCHITECTURE_EBPF_AF_XDP.md](docs/ARCHITECTURE_EBPF_AF_XDP.md) for the XDP parser, verifier, UMEM, and ring ownership specification.
+See [docs/AF_XDP_VALIDATION_RUNBOOK.md](docs/AF_XDP_VALIDATION_RUNBOOK.md) for the real-NIC zero-copy validation procedure and acceptance criteria.
 
 ## Speculative routing prototype
 

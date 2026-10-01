@@ -61,6 +61,65 @@
       ],
       "title": "Worker Outcomes",
       "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "moe-prometheus"},
+      "fieldConfig": {"defaults": {"unit": "s", "custom": {"drawStyle": "line", "lineWidth": 2}}, "overrides": []},
+      "gridPos": {"h": 6, "w": 12, "x": 0, "y": 22},
+      "id": 6,
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum(rate(moe_job_latency_seconds_bucket[5m])) by (le))", "legendFormat": "p50 job latency", "refId": "A"},
+        {"expr": "histogram_quantile(0.95, sum(rate(moe_job_latency_seconds_bucket[5m])) by (le))", "legendFormat": "p95 job latency", "refId": "B"},
+        {"expr": "histogram_quantile(0.99, sum(rate(moe_job_latency_seconds_bucket[5m])) by (le))", "legendFormat": "p99 job latency", "refId": "C"},
+        {"expr": "histogram_quantile(0.999, sum(rate(moe_job_latency_seconds_bucket[5m])) by (le))", "legendFormat": "p99.9 job latency", "refId": "D"}
+      ],
+      "title": "Job Latency SLO",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "moe-prometheus"},
+      "fieldConfig": {"defaults": {"unit": "percent", "custom": {"drawStyle": "line", "lineWidth": 2}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 1}, {"color": "red", "value": 5}]}}, "overrides": []},
+      "gridPos": {"h": 6, "w": 12, "x": 12, "y": 22},
+      "id": 7,
+      "targets": [{"expr": "100 * (rate(moe_saturated_drops_total[5m]) / clamp_min(rate(moe_rx_packets_total[5m]), 1))", "legendFormat": "Saturated drop budget", "refId": "A"}],
+      "title": "Drop Budget Consumption",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "moe-prometheus"},
+      "fieldConfig": {"defaults": {"unit": "ops", "custom": {"drawStyle": "bars", "fillOpacity": 70}}, "overrides": []},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 28},
+      "id": 8,
+      "targets": [{"expr": "sum by (reason) (rate(moe_drop_reason_total[5m]))", "legendFormat": "{{reason}}", "refId": "A"}],
+      "title": "Drop Reasons",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "moe-prometheus"},
+      "fieldConfig": {"defaults": {"unit": "s", "custom": {"drawStyle": "line", "lineWidth": 2}}, "overrides": []},
+      "gridPos": {"h": 7, "w": 24, "x": 0, "y": 36},
+      "id": 9,
+      "targets": [
+        {"expr": "histogram_quantile(0.99, sum(rate(moe_ingress_latency_seconds_bucket[5m])) by (le))", "legendFormat": "Ingress p99", "refId": "A"},
+        {"expr": "histogram_quantile(0.99, sum(rate(moe_queue_wait_latency_seconds_bucket[5m])) by (le))", "legendFormat": "Queue wait p99", "refId": "B"},
+        {"expr": "histogram_quantile(0.99, sum(rate(moe_execution_latency_seconds_bucket[5m])) by (le))", "legendFormat": "Execution p99", "refId": "C"},
+        {"expr": "histogram_quantile(0.99, sum(rate(moe_completion_latency_seconds_bucket[5m])) by (le))", "legendFormat": "Completion p99", "refId": "D"}
+      ],
+      "title": "Latency by Pipeline Phase",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "moe-prometheus"},
+      "fieldConfig": {"defaults": {"unit": "ops", "custom": {"drawStyle": "line", "lineWidth": 2}}, "overrides": []},
+      "gridPos": {"h": 7, "w": 24, "x": 0, "y": 43},
+      "id": 10,
+      "targets": [
+        {"expr": "rate(moe_predictions_total[5m])", "legendFormat": "Predictions/s", "refId": "A"},
+        {"expr": "rate(moe_reroutes_total[5m])", "legendFormat": "Reroutes/s", "refId": "B"},
+        {"expr": "rate(moe_low_confidence_predictions_total[5m])", "legendFormat": "Low-confidence/s", "refId": "C"}
+      ],
+      "title": "Routing Intelligence",
+      "type": "timeseries"
     }
   ],
   "refresh": "1s",

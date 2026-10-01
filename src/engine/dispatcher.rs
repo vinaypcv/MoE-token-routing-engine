@@ -1,8 +1,10 @@
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 use crossbeam_channel::{Sender, TrySendError};
 use xsk_rs::FrameDesc;
 
+use super::predictor::{PredictionError, TokenAwarePredictor};
 use super::telemetry::{PipelineTelemetry, EXPERT_METRIC_COUNT};
 
 const ETH_HEADER_LEN: usize = 14;
@@ -27,6 +29,23 @@ pub enum FrameDropReason {
     QueueClosed,
 }
 
+impl FrameDropReason {
+    fn metric_index(self) -> usize {
+        match self {
+            Self::Truncated => 0,
+            Self::UnsupportedEtherType => 1,
+            Self::UnsupportedIpProtocol => 2,
+            Self::InvalidIpv4Header => 3,
+            Self::FragmentedIpv4 => 4,
+            Self::InvalidUdpLength => 5,
+            Self::InvalidMagic => 6,
+            Self::UnknownExpert => 7,
+            Self::QueueFull => 8,
+            Self::QueueClosed => 9,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParsedToken {
     pub token_id: u64,
@@ -42,11 +61,14 @@ pub struct TokenJob {
     pub frame: FrameDesc,
     pub payload_offset: usize,
     pub feature_length: usize,
+    pub enqueued_at: Instant,
+    pub received_at: Instant,
 }
 
 pub struct EngineDispatcher {
     expert_senders: Vec<Sender<TokenJob>>,
     metrics: std::sync::Arc<PipelineTelemetry>,
+    predictor: Option<TokenAwarePredictor>,
 }
 
 impl EngineDispatcher {
@@ -57,6 +79,19 @@ impl EngineDispatcher {
         Self {
             expert_senders,
             metrics,
+            predictor: None,
+        }
+    }
+
+    pub fn with_predictor(
+        expert_senders: Vec<Sender<TokenJob>>,
+        metrics: std::sync::Arc<PipelineTelemetry>,
+        predictor: TokenAwarePredictor,
+    ) -> Self {
+        Self {
+            expert_senders,
+            metrics,
+            predictor: Some(predictor),
         }
     }
 
@@ -160,6 +195,7 @@ impl EngineDispatcher {
         frame_desc: FrameDesc,
         frame_bytes: &[u8],
     ) -> Result<ParsedToken, (FrameDesc, FrameDropReason)> {
+        let received_at = Instant::now();
         self.metrics
             .rx_packets_total
             .fetch_add(1, Ordering::Relaxed);
@@ -169,25 +205,62 @@ impl EngineDispatcher {
                 self.metrics
                     .invalid_packets_total
                     .fetch_add(1, Ordering::Relaxed);
+                self.metrics.drop_reasons[reason.metric_index()].fetch_add(1, Ordering::Relaxed);
                 return Err((frame_desc, reason));
             }
         };
+        self.metrics.record_phase_latency(0, received_at.elapsed());
 
-        let Some(sender) = self.expert_senders.get(parsed.expert_id as usize) else {
+        let mut selected_expert = parsed.expert_id as usize;
+        if let Some(predictor) = &self.predictor {
+            let feature_start = parsed.payload_offset + TOKEN_HEADER_LEN;
+            let feature_end = feature_start.saturating_add(parsed.feature_length);
+            let features = frame_bytes.get(feature_start..feature_end).unwrap_or(&[]);
+            self.metrics
+                .predictions_total
+                .fetch_add(1, Ordering::Relaxed);
+            let queue_depths = self
+                .metrics
+                .expert_queue_depth
+                .iter()
+                .map(|depth| depth.load(Ordering::Relaxed))
+                .collect::<Vec<_>>();
+            match predictor.predict(features, &queue_depths) {
+                Ok(predictions) => {
+                    if let Some(prediction) = predictions.first() {
+                        selected_expert = prediction.expert_id;
+                        if selected_expert != parsed.expert_id as usize {
+                            self.metrics.reroutes_total.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+                Err(PredictionError::LowConfidence) => {
+                    self.metrics
+                        .low_confidence_predictions_total
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                Err(PredictionError::EmptyFeatures | PredictionError::InvalidTopK) => {}
+            }
+        }
+        let Some(sender) = self.expert_senders.get(selected_expert) else {
             self.metrics
                 .invalid_packets_total
+                .fetch_add(1, Ordering::Relaxed);
+            self.metrics.drop_reasons[FrameDropReason::UnknownExpert.metric_index()]
                 .fetch_add(1, Ordering::Relaxed);
             return Err((frame_desc, FrameDropReason::UnknownExpert));
         };
 
         let job = TokenJob {
             token_id: parsed.token_id,
-            expert_id: parsed.expert_id,
+            expert_id: selected_expert as u8,
             frame: frame_desc,
             payload_offset: parsed.payload_offset,
             feature_length: parsed.feature_length,
+            enqueued_at: Instant::now(),
+            received_at,
         };
-        let expert_id = usize::from(parsed.expert_id);
+        let expert_id = selected_expert;
         if expert_id < EXPERT_METRIC_COUNT {
             self.metrics.expert_queue_depth[expert_id].fetch_add(1, Ordering::Relaxed);
         }
@@ -208,6 +281,8 @@ impl EngineDispatcher {
                 self.metrics
                     .saturated_drops_total
                     .fetch_add(1, Ordering::Relaxed);
+                self.metrics.drop_reasons[FrameDropReason::QueueFull.metric_index()]
+                    .fetch_add(1, Ordering::Relaxed);
                 if expert_id < EXPERT_METRIC_COUNT {
                     self.metrics.expert_drops[expert_id].fetch_add(1, Ordering::Relaxed);
                 }
@@ -219,6 +294,8 @@ impl EngineDispatcher {
                 }
                 self.metrics
                     .closed_queue_drops_total
+                    .fetch_add(1, Ordering::Relaxed);
+                self.metrics.drop_reasons[FrameDropReason::QueueClosed.metric_index()]
                     .fetch_add(1, Ordering::Relaxed);
                 Err((job.frame, FrameDropReason::QueueClosed))
             }

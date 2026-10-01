@@ -8,6 +8,25 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 pub const EXPERT_METRIC_COUNT: usize = 8;
+pub const DROP_REASON_COUNT: usize = 10;
+pub const LATENCY_PHASE_COUNT: usize = 4;
+pub const LATENCY_PHASE_NAMES: [&str; LATENCY_PHASE_COUNT] =
+    ["ingress", "queue_wait", "execution", "completion"];
+pub const DROP_REASON_NAMES: [&str; DROP_REASON_COUNT] = [
+    "truncated",
+    "unsupported_ether_type",
+    "unsupported_ip_protocol",
+    "invalid_ipv4_header",
+    "fragmented_ipv4",
+    "invalid_udp_length",
+    "invalid_magic",
+    "unknown_expert",
+    "queue_full",
+    "queue_closed",
+];
+const LATENCY_BUCKETS_MICROS: [u64; 9] = [
+    100, 500, 1_000, 5_000, 10_000, 50_000, 100_000, 500_000, 1_000_000,
+];
 
 pub struct PipelineTelemetry {
     pub rx_packets_total: AtomicU64,
@@ -19,6 +38,17 @@ pub struct PipelineTelemetry {
     pub closed_queue_drops_total: AtomicU64,
     pub recycled_frames_total: AtomicU64,
     pub recycle_failures_total: AtomicU64,
+    pub job_latency_bucket: [AtomicU64; LATENCY_BUCKETS_MICROS.len()],
+    pub job_latency_sum_nanos: AtomicU64,
+    pub job_latency_count: AtomicU64,
+    pub phase_latency_bucket: [[AtomicU64; LATENCY_BUCKETS_MICROS.len()]; LATENCY_PHASE_COUNT],
+    pub phase_latency_sum_nanos: [AtomicU64; LATENCY_PHASE_COUNT],
+    pub phase_latency_count: [AtomicU64; LATENCY_PHASE_COUNT],
+    pub service_capacity_per_tick: AtomicU64,
+    pub drop_reasons: [AtomicU64; DROP_REASON_COUNT],
+    pub predictions_total: AtomicU64,
+    pub reroutes_total: AtomicU64,
+    pub low_confidence_predictions_total: AtomicU64,
     pub expert_dispatched: [AtomicU64; EXPERT_METRIC_COUNT],
     pub expert_drops: [AtomicU64; EXPERT_METRIC_COUNT],
     pub expert_queue_depth: [AtomicU64; EXPERT_METRIC_COUNT],
@@ -36,6 +66,19 @@ impl Default for PipelineTelemetry {
             closed_queue_drops_total: AtomicU64::new(0),
             recycled_frames_total: AtomicU64::new(0),
             recycle_failures_total: AtomicU64::new(0),
+            job_latency_bucket: std::array::from_fn(|_| AtomicU64::new(0)),
+            job_latency_sum_nanos: AtomicU64::new(0),
+            job_latency_count: AtomicU64::new(0),
+            phase_latency_bucket: std::array::from_fn(|_| {
+                std::array::from_fn(|_| AtomicU64::new(0))
+            }),
+            phase_latency_sum_nanos: std::array::from_fn(|_| AtomicU64::new(0)),
+            phase_latency_count: std::array::from_fn(|_| AtomicU64::new(0)),
+            service_capacity_per_tick: AtomicU64::new(0),
+            drop_reasons: std::array::from_fn(|_| AtomicU64::new(0)),
+            predictions_total: AtomicU64::new(0),
+            reroutes_total: AtomicU64::new(0),
+            low_confidence_predictions_total: AtomicU64::new(0),
             expert_dispatched: std::array::from_fn(|_| AtomicU64::new(0)),
             expert_drops: std::array::from_fn(|_| AtomicU64::new(0)),
             expert_queue_depth: std::array::from_fn(|_| AtomicU64::new(0)),
@@ -47,6 +90,35 @@ impl PipelineTelemetry {
     pub fn record_recycled(&self, count: u64) {
         self.recycled_frames_total
             .fetch_add(count, Ordering::Relaxed);
+    }
+
+    pub fn record_job_latency(&self, elapsed: std::time::Duration) {
+        self.record_phase_latency(3, elapsed);
+    }
+
+    pub fn record_phase_latency(&self, phase: usize, elapsed: std::time::Duration) {
+        if phase >= LATENCY_PHASE_COUNT {
+            return;
+        }
+        let elapsed_nanos = elapsed.as_nanos().min(u128::from(u64::MAX)) as u64;
+        let elapsed_micros = elapsed.as_micros().min(u128::from(u64::MAX)) as u64;
+        self.phase_latency_sum_nanos[phase].fetch_add(elapsed_nanos, Ordering::Relaxed);
+        self.phase_latency_count[phase].fetch_add(1, Ordering::Relaxed);
+        for (index, boundary) in LATENCY_BUCKETS_MICROS.iter().enumerate() {
+            if elapsed_micros <= *boundary {
+                self.phase_latency_bucket[phase][index].fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        if phase == 3 {
+            self.job_latency_sum_nanos
+                .fetch_add(elapsed_nanos, Ordering::Relaxed);
+            self.job_latency_count.fetch_add(1, Ordering::Relaxed);
+            for (index, boundary) in LATENCY_BUCKETS_MICROS.iter().enumerate() {
+                if elapsed_micros <= *boundary {
+                    self.job_latency_bucket[index].fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
     }
 
     pub fn render_prometheus(&self) -> String {
@@ -104,6 +176,100 @@ impl PipelineTelemetry {
             "moe_recycle_failures_total",
             "UMEM frame recycle channel failures",
             self.recycle_failures_total.load(Ordering::Relaxed),
+        );
+        let _ = writeln!(output, "# HELP moe_job_latency_seconds End-to-end job latency from queue admission to completion");
+        let _ = writeln!(output, "# TYPE moe_job_latency_seconds histogram");
+        for (index, boundary) in LATENCY_BUCKETS_MICROS.iter().enumerate() {
+            let _ = writeln!(
+                output,
+                "moe_job_latency_seconds_bucket{{le=\"{}\"}} {}",
+                *boundary as f64 / 1_000_000.0,
+                self.job_latency_bucket[index].load(Ordering::Relaxed)
+            );
+        }
+        let _ = writeln!(
+            output,
+            "moe_job_latency_seconds_bucket{{le=\"+Inf\"}} {}",
+            self.job_latency_count.load(Ordering::Relaxed)
+        );
+        let _ = writeln!(
+            output,
+            "moe_job_latency_seconds_sum {}",
+            self.job_latency_sum_nanos.load(Ordering::Relaxed) as f64 / 1_000_000_000.0
+        );
+        let _ = writeln!(
+            output,
+            "moe_job_latency_seconds_count {}",
+            self.job_latency_count.load(Ordering::Relaxed)
+        );
+        for (phase, phase_name) in LATENCY_PHASE_NAMES.iter().enumerate() {
+            let _ = writeln!(
+                output,
+                "# HELP moe_{phase_name}_latency_seconds {phase_name} latency histogram"
+            );
+            let _ = writeln!(output, "# TYPE moe_{phase_name}_latency_seconds histogram");
+            for (index, boundary) in LATENCY_BUCKETS_MICROS.iter().enumerate() {
+                let _ = writeln!(
+                    output,
+                    "moe_{phase_name}_latency_seconds_bucket{{le=\"{}\"}} {}",
+                    *boundary as f64 / 1_000_000.0,
+                    self.phase_latency_bucket[phase][index].load(Ordering::Relaxed)
+                );
+            }
+            let _ = writeln!(
+                output,
+                "moe_{phase_name}_latency_seconds_bucket{{le=\"+Inf\"}} {}",
+                self.phase_latency_count[phase].load(Ordering::Relaxed)
+            );
+            let _ = writeln!(
+                output,
+                "moe_{phase_name}_latency_seconds_sum {}",
+                self.phase_latency_sum_nanos[phase].load(Ordering::Relaxed) as f64
+                    / 1_000_000_000.0
+            );
+            let _ = writeln!(
+                output,
+                "moe_{phase_name}_latency_seconds_count {}",
+                self.phase_latency_count[phase].load(Ordering::Relaxed)
+            );
+        }
+        let _ = writeln!(output, "# HELP moe_service_capacity_per_tick Current synthetic service capacity per 100ms tick");
+        let _ = writeln!(output, "# TYPE moe_service_capacity_per_tick gauge");
+        let _ = writeln!(
+            output,
+            "moe_service_capacity_per_tick {}",
+            self.service_capacity_per_tick.load(Ordering::Relaxed)
+        );
+        let _ = writeln!(
+            output,
+            "# HELP moe_drop_reason_total Dropped frames by parser or backpressure reason"
+        );
+        let _ = writeln!(output, "# TYPE moe_drop_reason_total counter");
+        for (index, reason) in DROP_REASON_NAMES.iter().enumerate() {
+            let _ = writeln!(
+                output,
+                "moe_drop_reason_total{{reason=\"{reason}\"}} {}",
+                self.drop_reasons[index].load(Ordering::Relaxed)
+            );
+        }
+        render_counter(
+            &mut output,
+            "moe_predictions_total",
+            "Token-aware expert predictions attempted",
+            self.predictions_total.load(Ordering::Relaxed),
+        );
+        render_counter(
+            &mut output,
+            "moe_reroutes_total",
+            "Jobs routed to an expert different from the packet hint",
+            self.reroutes_total.load(Ordering::Relaxed),
+        );
+        render_counter(
+            &mut output,
+            "moe_low_confidence_predictions_total",
+            "Predictions rejected because confidence was below threshold",
+            self.low_confidence_predictions_total
+                .load(Ordering::Relaxed),
         );
         render_labeled_gauge_header(
             &mut output,
@@ -248,5 +414,19 @@ mod tests {
         let rendered = metrics.render_prometheus();
         assert!(rendered.contains("moe_rx_packets_total 12"));
         assert!(rendered.contains("moe_expert_queue_depth{expert_id=\"3\"} 4"));
+    }
+
+    #[test]
+    fn latency_histogram_reports_count_and_inclusive_buckets() {
+        let metrics = PipelineTelemetry::default();
+        metrics.record_job_latency(std::time::Duration::from_micros(50));
+        metrics.record_job_latency(std::time::Duration::from_micros(700));
+        let rendered = metrics.render_prometheus();
+
+        assert!(rendered.contains("moe_job_latency_seconds_count 2"));
+        assert!(rendered.contains("moe_job_latency_seconds_bucket{le=\"0.0001\"} 1"));
+        assert!(rendered.contains("moe_job_latency_seconds_bucket{le=\"0.0005\"} 1"));
+        assert!(rendered.contains("moe_job_latency_seconds_bucket{le=\"0.001\"} 2"));
+        assert!(rendered.contains("moe_job_latency_seconds_bucket{le=\"+Inf\"} 2"));
     }
 }

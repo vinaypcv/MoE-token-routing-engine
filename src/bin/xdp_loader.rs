@@ -5,6 +5,7 @@ use moe_holistic_engine::engine::backpressure::{
     BackpressureRouter, DEFAULT_EXPERT_COUNT, DEFAULT_EXPERT_QUEUE_CAPACITY,
 };
 use moe_holistic_engine::engine::telemetry::TelemetryServer;
+use moe_holistic_engine::engine::predictor::TokenAwarePredictor;
 use std::env;
 use std::error::Error;
 use std::num::NonZeroU32;
@@ -102,11 +103,27 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("Object: {}", object_path.display());
     println!("Press Ctrl+C to stop receiving and detach.");
 
-    let router = BackpressureRouter::new(
+    let routing_top_k = env::var("MOE_ROUTING_TOP_K")
+        .unwrap_or_else(|_| "1".to_owned())
+        .parse::<usize>()?;
+    let routing_confidence = env::var("MOE_ROUTING_CONFIDENCE")
+        .unwrap_or_else(|_| "0".to_owned())
+        .parse::<f32>()?;
+    let predictor = if routing_top_k > 1 {
+        Some(TokenAwarePredictor::new(
+            DEFAULT_EXPERT_COUNT,
+            routing_top_k,
+            routing_confidence,
+        )?)
+    } else {
+        None
+    };
+    let router = BackpressureRouter::new_with_predictor(
         umem.clone(),
         DEFAULT_EXPERT_COUNT,
         DEFAULT_EXPERT_QUEUE_CAPACITY,
         UMEM_FRAME_COUNT as usize,
+        predictor,
     )?;
     let metrics = router.metrics();
     metrics.record_recycled(seeded_frames as u64);

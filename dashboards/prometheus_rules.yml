@@ -1,0 +1,27 @@
+groups:
+  - name: moe_pipeline_slos
+    rules:
+      - alert: MoeTelemetryTargetDown
+        expr: up{job="moe_af_xdp"} == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: MoE telemetry target is down
+          description: Prometheus cannot scrape the MoE telemetry endpoint.
+      - alert: MoeLatencySloBreached
+        expr: histogram_quantile(0.99, sum(rate(moe_job_latency_seconds_bucket[5m])) by (le)) > 0.1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: MoE p99 job latency exceeds 100ms
+          description: The p99 queue-to-completion latency is above the demo SLO.
+      - alert: MoeDropBudgetExhausted
+        expr: 100 * (rate(moe_saturated_drops_total[5m]) / clamp_min(rate(moe_rx_packets_total[5m]), 1)) > 5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: MoE saturated drop budget exceeded
+          description: More than 5 percent of received packets are being shed.

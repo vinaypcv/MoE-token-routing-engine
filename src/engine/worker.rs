@@ -62,6 +62,7 @@ pub(crate) fn spawn_expert_worker<M: ExpertModel + ?Sized>(
         .spawn(move || {
             while let Ok(job) = receiver.recv() {
                 let _frame_guard = FrameGuard::new(job.frame, Arc::clone(&recycler));
+                telemetry.record_phase_latency(1, job.enqueued_at.elapsed());
                 let expert_id = usize::from(job.expert_id);
                 if expert_id < EXPERT_METRIC_COUNT {
                     telemetry.expert_queue_depth[expert_id]
@@ -75,16 +76,21 @@ pub(crate) fn spawn_expert_worker<M: ExpertModel + ?Sized>(
                     .contents()
                     .get(feature_start..feature_end)
                     .unwrap_or(&[]);
+                let execution_started = std::time::Instant::now();
                 match model.process_token(job.token_id, features) {
                     Ok(()) => {
                         telemetry
                             .processed_jobs
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        telemetry.record_phase_latency(2, execution_started.elapsed());
+                        telemetry.record_job_latency(job.received_at.elapsed());
                     }
                     Err(_) => {
                         telemetry
                             .execution_errors
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        telemetry.record_phase_latency(2, execution_started.elapsed());
+                        telemetry.record_job_latency(job.received_at.elapsed());
                     }
                 }
             }

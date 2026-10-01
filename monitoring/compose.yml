@@ -10,6 +10,7 @@ services:
       - "9090:9090"
     volumes:
       - ../dashboards/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../dashboards/prometheus_rules.yml:/etc/prometheus/prometheus_rules.yml:ro
     restart: unless-stopped
 
   grafana:

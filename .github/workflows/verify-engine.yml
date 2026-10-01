@@ -39,6 +39,33 @@ jobs:
       - name: Run Speculative Kernel
         run: cargo run --release --bin speculative_kernel
 
+      - name: Run Reproducible Simulation Report
+        run: |
+          export MOE_METRICS_ADDR=127.0.0.1:9100
+          export MOE_DEMO_UDP_ADDR=127.0.0.1:9000
+          export MOE_DEMO_ADAPTIVE_BACKPRESSURE=true
+          export MOE_DEMO_LOAD_SHEDDING=expert-aware
+          cargo build --release --bin traffic_profiler
+          cargo run --release --bin telemetry_demo > /tmp/moe-telemetry.log 2>&1 &
+          telemetry_pid=$!
+          trap 'kill "$telemetry_pid" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 50); do
+            curl --silent --fail http://127.0.0.1:9100/metrics >/dev/null && break
+            sleep 0.2
+          done
+          mkdir -p artifacts
+          bash scripts/run_traffic_benchmark_report.sh \
+            127.0.0.1:9000 4 10 8 40000 256 artifacts/traffic-report.csv
+          cp artifacts/traffic-report.json artifacts/traffic-report-metadata.json
+          cp /tmp/moe-telemetry.log artifacts/telemetry.log
+
+      - name: Upload Simulation Evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: simulation-evidence-${{ github.sha }}
+          if-no-files-found: error
+          path: artifacts/
+
   build-ebpf:
     runs-on: ubuntu-24.04
     steps:

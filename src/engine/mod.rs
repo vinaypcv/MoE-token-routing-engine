@@ -1,8 +1,11 @@
+pub mod adaptive_quant_routing;
 pub mod backpressure;
 pub mod dispatcher;
 pub mod elastic_quant;
 pub mod nack;
+pub mod nack_loop;
 pub mod nack_tx;
 pub mod predictor;
 pub mod telemetry;
+pub mod umem_dmabuf;
 pub mod worker;

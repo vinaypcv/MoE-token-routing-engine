@@ -6,7 +6,7 @@ use moe_holistic_engine::engine::backpressure::{
 };
 use moe_holistic_engine::engine::dispatcher::EngineDispatcher;
 use moe_holistic_engine::engine::elastic_quant::ElasticQuantizer;
-use moe_holistic_engine::engine::nack::{NackFrame, SequenceTracker};
+use moe_holistic_engine::engine::nack_loop::{ActiveNackLoop, NackEndpoint};
 use moe_holistic_engine::engine::nack_tx::NackTxQueue;
 use moe_holistic_engine::engine::predictor::TokenAwarePredictor;
 use moe_holistic_engine::engine::telemetry::TelemetryServer;
@@ -33,17 +33,7 @@ const XSK_MAP_CAPACITY: u32 = 64;
 const FILL_BATCH_SIZE: usize = 64;
 const NACK_TX_FRAME_COUNT: usize = 64;
 
-#[derive(Clone, Copy)]
-struct NackTxConfig {
-    source_mac: [u8; 6],
-    destination_mac: [u8; 6],
-    source_ip: [u8; 4],
-    destination_ip: [u8; 4],
-    source_port: u16,
-    destination_port: u16,
-}
-
-fn load_nack_tx_config() -> Result<Option<NackTxConfig>, Box<dyn Error>> {
+fn load_nack_tx_config() -> Result<Option<NackEndpoint>, Box<dyn Error>> {
     let enabled = env::var("MOE_NACK_TX_ENABLED")
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
         .unwrap_or(false);
@@ -61,7 +51,7 @@ fn load_nack_tx_config() -> Result<Option<NackTxConfig>, Box<dyn Error>> {
         .octets();
     let source_port = env::var("MOE_NACK_SOURCE_PORT")?.parse::<u16>()?;
     let destination_port = env::var("MOE_NACK_DESTINATION_PORT")?.parse::<u16>()?;
-    Ok(Some(NackTxConfig {
+    Ok(Some(NackEndpoint {
         source_mac,
         destination_mac,
         source_ip,
@@ -222,7 +212,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let receiver = thread::spawn(move || -> std::io::Result<()> {
         let mut descriptors = vec![xsk_rs::FrameDesc::default(); RX_BATCH_SIZE];
         let mut fill_batch = [xsk_rs::FrameDesc::default(); FILL_BATCH_SIZE];
-        let sequence_tracker = SequenceTracker::default();
+        let nack_loop = ActiveNackLoop::default();
         let mut nack_tx = nack_tx;
 
         while receiver_running.load(Ordering::Acquire) {
@@ -254,24 +244,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             let received = unsafe { rx_queue.poll_and_consume(&mut descriptors, 25)? };
             for descriptor in descriptors.iter().take(received).copied() {
-                let nack_request = {
+                let nack_frame = {
                     let packet = unsafe { receiver_umem.data(&descriptor) };
                     EngineDispatcher::parse_frame(packet.contents())
                         .ok()
                         .and_then(|parsed| {
-                            sequence_tracker.observe(parsed.expert_id, parsed.sequence_id)
+                            nack_loop.process_packet(
+                                parsed.expert_id,
+                                parsed.sequence_id,
+                                nack_tx_config,
+                            )
                         })
                 };
-                if let (Some(request), Some(config)) = (nack_request, nack_tx_config) {
-                    let frame = NackFrame::build(
-                        config.source_mac,
-                        config.destination_mac,
-                        config.source_ip,
-                        config.destination_ip,
-                        config.source_port,
-                        config.destination_port,
-                        request,
-                    );
+                if let Some(frame) = nack_frame {
                     match nack_tx.send(&frame) {
                         Ok(true) => {
                             receiver_metrics

@@ -25,6 +25,8 @@ cargo build --release --bin xdp_loader
 
 The workspace includes a `no_std` eBPF crate, so do not run `cargo check --workspace` with the host target. Validate host code with `cargo check -p moe_holistic_engine --all-targets --all-features` and build the kernel with the explicit BPF target command above. The UDP-to-metrics smoke test is available with `bash scripts/telemetry_runtime_smoke.sh`; it does not replace the native-NIC AF_XDP run below.
 
+The experimental `engine::umem_dmabuf` pool maps anonymous host memory or an already-exported DMA-BUF FD. It does not allocate storage from `/dev/vgem`, register memory with `xsk-rs`, or establish AF_XDP zero-copy; those claims require separate exporter, driver, and NIC integration and validation.
+
 ## Baseline
 
 Run the socket-path baseline first and save its output:

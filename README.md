@@ -37,6 +37,8 @@ For a repeatable uniform-versus-skewed traffic report on Linux, run `bash script
 
 For the comparison matrix, run `bash scripts/run_baseline_matrix.sh 30 benchmark-matrix`; it records the standard UDP and simulated phases plus explicit native-NIC gates for AF_XDP copy and zero-copy.
 
+For the FP32 versus INT8 quantization profile, run `cargo bench --bench quantization_profiles`. It reports throughput and p99 latency for the current owned-buffer quantizer; it is not a claim about in-place VRAM quantization.
+
 To listen for an external UDP generator instead, append `--external`. This measures the normal UDP socket path, not AF_XDP; see [docs/ARCHITECTURE_EBPF_AF_XDP.md](docs/ARCHITECTURE_EBPF_AF_XDP.md) for the AF_XDP measurement caveats.
 
 Generate batched UDP token traffic with a token header followed by deterministic feature bytes. Arguments configure workers, distribution, duration, rate limit, and feature length:
@@ -57,6 +59,7 @@ Set `MOE_DEMO_ADAPTIVE_BACKPRESSURE=true` to let the synthetic service capacity 
 Set `MOE_DEMO_LOAD_SHEDDING` to `oldest` (FIFO default), `priority` (reserve capacity for Expert 0), or `expert-aware` (tighten repeatedly dropping expert queues). Each rejection remains visible through `moe_drop_reason_total{reason="queue_full"}`.
 
 For the real AF_XDP loader, set `MOE_ROUTING_TOP_K` above `1` to enable token-aware top-k prediction and `MOE_ROUTING_CONFIDENCE` to reject low-confidence predictions. Prediction, reroute, and low-confidence counters are exported as `moe_predictions_total`, `moe_reroutes_total`, and `moe_low_confidence_predictions_total`.
+Set `MOE_FALLBACK_EXPERT_ID` to a reserved expert slot, such as `7`, to route saturated primary queues to that fallback slot at the 90% watermark. This is safe for the current raw-byte token format; INT8 conversion requires an explicit FP32 payload contract and is exposed as a standalone `ElasticQuantizer` policy.
 
 Import [docs/grafana/moe-af-xdp-dashboard.json](docs/grafana/moe-af-xdp-dashboard.json) into Grafana and select the Prometheus source scraping `/metrics`. The endpoint binds to loopback by default; to scrape from a separate host or container, set `MOE_METRICS_ADDR=0.0.0.0:9100` and restrict network access appropriately.
 

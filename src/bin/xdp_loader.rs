@@ -4,6 +4,7 @@ use aya::Bpf;
 use moe_holistic_engine::engine::backpressure::{
     BackpressureRouter, DEFAULT_EXPERT_COUNT, DEFAULT_EXPERT_QUEUE_CAPACITY,
 };
+use moe_holistic_engine::engine::elastic_quant::ElasticQuantizer;
 use moe_holistic_engine::engine::predictor::TokenAwarePredictor;
 use moe_holistic_engine::engine::telemetry::TelemetryServer;
 use std::env;
@@ -118,12 +119,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
     } else {
         None
     };
-    let router = BackpressureRouter::new_with_predictor(
+    let fallback_expert = env::var("MOE_FALLBACK_EXPERT_ID")
+        .ok()
+        .map(|value| value.parse::<usize>())
+        .transpose()?;
+    let quantizer = fallback_expert
+        .map(|expert_id| ElasticQuantizer::new(90, Some(expert_id)))
+        .transpose()?;
+    let router = BackpressureRouter::new_with_routing(
         umem.clone(),
         DEFAULT_EXPERT_COUNT,
         DEFAULT_EXPERT_QUEUE_CAPACITY,
         UMEM_FRAME_COUNT as usize,
         predictor,
+        quantizer,
     )?;
     let metrics = router.metrics();
     metrics.record_recycled(seeded_frames as u64);

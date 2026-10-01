@@ -4,6 +4,7 @@ use std::time::Instant;
 use crossbeam_channel::{Sender, TrySendError};
 use xsk_rs::FrameDesc;
 
+use super::elastic_quant::{CongestionAction, ElasticQuantizer};
 use super::predictor::{PredictionError, TokenAwarePredictor};
 use super::telemetry::{PipelineTelemetry, EXPERT_METRIC_COUNT};
 
@@ -69,6 +70,7 @@ pub struct EngineDispatcher {
     expert_senders: Vec<Sender<TokenJob>>,
     metrics: std::sync::Arc<PipelineTelemetry>,
     predictor: Option<TokenAwarePredictor>,
+    quantizer: Option<ElasticQuantizer>,
 }
 
 impl EngineDispatcher {
@@ -80,6 +82,7 @@ impl EngineDispatcher {
             expert_senders,
             metrics,
             predictor: None,
+            quantizer: None,
         }
     }
 
@@ -92,6 +95,21 @@ impl EngineDispatcher {
             expert_senders,
             metrics,
             predictor: Some(predictor),
+            quantizer: None,
+        }
+    }
+
+    pub fn with_routing(
+        expert_senders: Vec<Sender<TokenJob>>,
+        metrics: std::sync::Arc<PipelineTelemetry>,
+        predictor: Option<TokenAwarePredictor>,
+        quantizer: Option<ElasticQuantizer>,
+    ) -> Self {
+        Self {
+            expert_senders,
+            metrics,
+            predictor,
+            quantizer,
         }
     }
 
@@ -251,6 +269,26 @@ impl EngineDispatcher {
             return Err((frame_desc, FrameDropReason::UnknownExpert));
         };
 
+        if let Some(quantizer) = &self.quantizer {
+            let depth = self.expert_queue_depth(selected_expert);
+            match quantizer.action(depth, sender.capacity().unwrap_or(0) + depth) {
+                CongestionAction::Fallback { expert_id }
+                    if expert_id != selected_expert
+                        && self.expert_senders.get(expert_id).is_some() =>
+                {
+                    selected_expert = expert_id;
+                    self.metrics
+                        .fallback_routed_total
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                CongestionAction::PreservePrecision | CongestionAction::Quantize => {}
+                CongestionAction::Fallback { .. } => {}
+            }
+        }
+        let Some(sender) = self.expert_senders.get(selected_expert) else {
+            return Err((frame_desc, FrameDropReason::UnknownExpert));
+        };
+
         let job = TokenJob {
             token_id: parsed.token_id,
             expert_id: selected_expert as u8,
@@ -300,6 +338,10 @@ impl EngineDispatcher {
                 Err((job.frame, FrameDropReason::QueueClosed))
             }
         }
+    }
+
+    fn expert_queue_depth(&self, expert_id: usize) -> usize {
+        self.metrics.expert_queue_depth[expert_id].load(Ordering::Relaxed) as usize
     }
 }
 

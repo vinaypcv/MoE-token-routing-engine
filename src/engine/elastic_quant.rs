@@ -17,6 +17,18 @@ pub enum QuantizationError {
     EmptyFeatures,
 }
 
+impl std::fmt::Display for QuantizationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let message = match self {
+            Self::InvalidFeatureBytes => "invalid quantizer configuration",
+            Self::EmptyFeatures => "cannot quantize an empty feature vector",
+        };
+        formatter.write_str(message)
+    }
+}
+
+impl std::error::Error for QuantizationError {}
+
 pub struct ElasticQuantizer {
     high_watermark_percent: u8,
     fallback_expert: Option<usize>,

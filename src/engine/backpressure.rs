@@ -8,6 +8,7 @@ use xsk_rs::umem::Umem;
 use xsk_rs::FrameDesc;
 
 use super::dispatcher::{EngineDispatcher, TokenJob};
+use super::elastic_quant::ElasticQuantizer;
 use super::predictor::TokenAwarePredictor;
 use super::telemetry::{PipelineTelemetry, EXPERT_METRIC_COUNT};
 use super::worker::{spawn_expert_worker, ExpertModel, LinearExpertModel};
@@ -85,6 +86,24 @@ impl BackpressureRouter {
         frame_pool_capacity: usize,
         predictor: Option<TokenAwarePredictor>,
     ) -> io::Result<Self> {
+        Self::new_with_routing(
+            umem,
+            expert_count,
+            queue_capacity,
+            frame_pool_capacity,
+            predictor,
+            None,
+        )
+    }
+
+    pub fn new_with_routing(
+        umem: Umem,
+        expert_count: usize,
+        queue_capacity: usize,
+        frame_pool_capacity: usize,
+        predictor: Option<TokenAwarePredictor>,
+        quantizer: Option<ElasticQuantizer>,
+    ) -> io::Result<Self> {
         if expert_count == 0
             || expert_count > EXPERT_METRIC_COUNT
             || queue_capacity == 0
@@ -121,12 +140,12 @@ impl BackpressureRouter {
             workers.push(worker);
         }
 
-        let dispatcher = match predictor {
-            Some(predictor) => {
-                EngineDispatcher::with_predictor(expert_senders, Arc::clone(&metrics), predictor)
-            }
-            None => EngineDispatcher::new(expert_senders, Arc::clone(&metrics)),
-        };
+        let dispatcher = EngineDispatcher::with_routing(
+            expert_senders,
+            Arc::clone(&metrics),
+            predictor,
+            quantizer,
+        );
         Ok(Self {
             dispatcher: Some(dispatcher),
             recycle_sender: Some(recycle_sender),

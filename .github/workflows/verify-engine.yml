@@ -59,3 +59,26 @@ jobs:
 
       - name: Build eBPF Object
         run: cargo build -Z build-std=core --release -p moe-ebpf-kernel --target bpfel-unknown-none
+
+      - name: Build AF_XDP Userspace Loader
+        run: cargo build --release --bin xdp_loader
+
+      - name: Write Build Metadata
+        run: |
+          mkdir -p artifacts
+          printf 'commit=%s\n' "$GITHUB_SHA" > artifacts/build-metadata.txt
+          printf 'runner=%s\n' "$RUNNER_OS" >> artifacts/build-metadata.txt
+          printf 'kernel_target=%s\n' 'bpfel-unknown-none' >> artifacts/build-metadata.txt
+          printf 'toolchain=%s\n' 'nightly-2025-12-01' >> artifacts/build-metadata.txt
+          sha256sum target/bpfel-unknown-none/release/libmoe_ebpf_kernel.so >> artifacts/build-metadata.txt
+          sha256sum target/release/xdp_loader >> artifacts/build-metadata.txt
+
+      - name: Upload AF_XDP Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: af-xdp-build-${{ github.sha }}
+          if-no-files-found: error
+          path: |
+            target/bpfel-unknown-none/release/libmoe_ebpf_kernel.so
+            target/release/xdp_loader
+            artifacts/build-metadata.txt

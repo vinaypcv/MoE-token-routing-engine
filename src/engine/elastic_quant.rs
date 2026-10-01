@@ -70,13 +70,44 @@ impl ElasticQuantizer {
             .map(|value| value.abs())
             .fold(0.0_f32, f32::max);
         let scale = if max_abs == 0.0 { 1.0 } else { max_abs / 127.0 };
-        let values = features
-            .iter()
-            .map(|value| (value / scale).round().clamp(-128.0, 127.0) as i8)
-            .collect();
+        let values = if cfg!(target_arch = "x86_64") && is_x86_feature_detected!("avx2") {
+            // SAFETY: the runtime feature check above guarantees AVX2 support.
+            unsafe { quantize_avx2(features, scale) }
+        } else {
+            quantize_scalar(features, scale)
+        };
         Ok(QuantizedFeatures { values, scale })
     }
 }
+
+fn quantize_scalar(features: &[f32], scale: f32) -> Vec<i8> {
+    features
+        .iter()
+        .map(|value| (value / scale).round().clamp(-128.0, 127.0) as i8)
+        .collect()
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn quantize_avx2(features: &[f32], scale: f32) -> Vec<i8> {
+    use std::arch::x86_64::{_mm256_cvtps_epi32, _mm256_loadu_ps, _mm256_mul_ps, _mm256_set1_ps};
+
+    let mut values = Vec::with_capacity(features.len());
+    let scale_vector = _mm256_set1_ps(1.0 / scale);
+    let (chunks, remainder) = features.as_chunks::<8>();
+    for chunk in chunks {
+        let scaled = _mm256_mul_ps(_mm256_loadu_ps(chunk.as_ptr()), scale_vector);
+        let rounded = _mm256_cvtps_epi32(scaled);
+        let mut lanes = [0i32; 8];
+        _mm256_storeu_si256(lanes.as_mut_ptr().cast(), rounded);
+        values.extend(lanes.map(|value| value.clamp(-128, 127) as i8));
+    }
+    values.extend(quantize_scalar(remainder, scale));
+    values
+}
+
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::_mm256_storeu_si256;
 
 #[cfg(test)]
 mod tests {

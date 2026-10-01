@@ -39,6 +39,8 @@ For the comparison matrix, run `bash scripts/run_baseline_matrix.sh 30 benchmark
 
 For the FP32 versus INT8 quantization profile, run `cargo bench --bench quantization_profiles`. It reports throughput and p99 latency for the current owned-buffer quantizer; it is not a claim about in-place VRAM quantization.
 
+The `NackTxQueue` adapter uses the real `xsk-rs` TX and completion-ring APIs to submit fixed-size NACK frames from UMEM-owned descriptors. Live loader wiring still requires reserving TX frames and adding a sequence field to the token packet contract; the current 10-byte header has no independent sequence identifier.
+
 To listen for an external UDP generator instead, append `--external`. This measures the normal UDP socket path, not AF_XDP; see [docs/ARCHITECTURE_EBPF_AF_XDP.md](docs/ARCHITECTURE_EBPF_AF_XDP.md) for the AF_XDP measurement caveats.
 
 Generate batched UDP token traffic with a token header followed by deterministic feature bytes. Arguments configure workers, distribution, duration, rate limit, and feature length:

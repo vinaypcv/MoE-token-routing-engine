@@ -58,3 +58,9 @@ The run is valid only when packet accounting agrees across the generator, NIC, X
 Stop the loader with `Ctrl+C`; it detaches the XDP program before exit. Restore the interface configuration and compare post-run NIC counters with the baseline. Store the command line, kernel/driver versions, metrics export, Grafana snapshot, and raw benchmark output together so the result is reproducible.
 
 The WSL telemetry demo and UDP traffic profiler are useful for exercising queue behavior and dashboards, but they do not satisfy this zero-copy validation gate.
+
+## DMABUF and NACK boundaries
+
+DMABUF support must be proven by the target kernel, NIC driver, and exporter. A VGEM buffer is a host-side DRM test buffer; it is not GPU VRAM and does not prove GPUDirect or PCIe peer-to-peer DMA. Do not label a VGEM-backed run as GPU-direct.
+
+The userspace sequence tracker can produce bounded `NackRequest` events for missing token sequences. Turning those events into raw Ethernet retransmission requires an AF_XDP TX ring, a defined NACK frame format, sender-side retransmission state, and a loss/ordering contract. The tracker alone does not provide reliable transport semantics.

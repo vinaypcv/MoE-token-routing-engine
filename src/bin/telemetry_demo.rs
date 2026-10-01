@@ -26,9 +26,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let adaptive_backpressure = env::var("MOE_DEMO_ADAPTIVE_BACKPRESSURE")
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
         .unwrap_or(false);
-    let load_shedding = env::var("MOE_DEMO_LOAD_SHEDDING")
-        .unwrap_or_else(|_| "oldest".to_owned());
-    if !matches!(load_shedding.as_str(), "oldest" | "priority" | "expert-aware") {
+    let load_shedding = env::var("MOE_DEMO_LOAD_SHEDDING").unwrap_or_else(|_| "oldest".to_owned());
+    if !matches!(
+        load_shedding.as_str(),
+        "oldest" | "priority" | "expert-aware"
+    ) {
         return Err("MOE_DEMO_LOAD_SHEDDING must be oldest, priority, or expert-aware".into());
     }
     if queue_capacity == 0 || service_per_tick == 0 {

@@ -4,8 +4,8 @@ use aya::Bpf;
 use moe_holistic_engine::engine::backpressure::{
     BackpressureRouter, DEFAULT_EXPERT_COUNT, DEFAULT_EXPERT_QUEUE_CAPACITY,
 };
-use moe_holistic_engine::engine::telemetry::TelemetryServer;
 use moe_holistic_engine::engine::predictor::TokenAwarePredictor;
+use moe_holistic_engine::engine::telemetry::TelemetryServer;
 use std::env;
 use std::error::Error;
 use std::num::NonZeroU32;

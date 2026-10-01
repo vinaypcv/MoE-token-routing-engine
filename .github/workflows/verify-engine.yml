@@ -11,10 +11,10 @@ env:
 
 jobs:
   validate-and-test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout Code Base
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install AF_XDP Build Dependencies
         run: sudo apt-get update && sudo apt-get install -y clang llvm m4 libelf-dev zlib1g-dev
@@ -28,10 +28,10 @@ jobs:
         run: cargo fmt --check
 
       - name: Run Deep Static Memory Analysis Lints
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy -p moe_holistic_engine --all-targets --all-features -- -D warnings
 
-      - name: Run Tests
-        run: cargo test
+      - name: Run Host Engine Tests
+        run: cargo test -p moe_holistic_engine --no-fail-fast
 
       - name: Run Main Engine
         run: cargo run --release --bin moe_holistic_engine
@@ -40,10 +40,10 @@ jobs:
         run: cargo run --release --bin speculative_kernel
 
   build-ebpf:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout Code Base
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install AF_XDP Build Dependencies
         run: sudo apt-get update && sudo apt-get install -y clang llvm m4 libelf-dev zlib1g-dev

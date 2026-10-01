@@ -5,7 +5,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const BATCH_SIZE: usize = 64;
-const TOKEN_HEADER_SIZE: usize = 10;
+const TOKEN_HEADER_SIZE: usize = 14;
 const MAX_UDP_PAYLOAD_SIZE: usize = 65_507;
 
 #[derive(Clone, Copy)]
@@ -128,6 +128,7 @@ fn run_worker(config: WorkerConfig) -> io::Result<WorkerResult> {
             payloads[index][1..9].copy_from_slice(&sequence.to_be_bytes());
             payloads[index][9] =
                 generate_expert(config.distribution, sequence, config.expert_count);
+            payloads[index][10..14].copy_from_slice(&(sequence as u32).to_be_bytes());
             for (feature_index, activation) in
                 payloads[index][TOKEN_HEADER_SIZE..].iter_mut().enumerate()
             {

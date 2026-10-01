@@ -5,13 +5,14 @@ use crossbeam_channel::{Sender, TrySendError};
 use xsk_rs::FrameDesc;
 
 use super::elastic_quant::{CongestionAction, ElasticQuantizer};
+use super::nack::SequenceTracker;
 use super::predictor::{PredictionError, TokenAwarePredictor};
 use super::telemetry::{PipelineTelemetry, EXPERT_METRIC_COUNT};
 
 const ETH_HEADER_LEN: usize = 14;
 const IPV4_MIN_HEADER_LEN: usize = 20;
 const UDP_HEADER_LEN: usize = 8;
-const TOKEN_HEADER_LEN: usize = 10;
+pub const TOKEN_HEADER_LEN: usize = 14;
 const IPV4_ETHERTYPE: u16 = 0x0800;
 const UDP_PROTOCOL: u8 = 17;
 const TOKEN_MAGIC: u8 = 0x77;
@@ -51,6 +52,7 @@ impl FrameDropReason {
 pub struct ParsedToken {
     pub token_id: u64,
     pub expert_id: u8,
+    pub sequence_id: u32,
     pub payload_offset: usize,
     pub feature_length: usize,
 }
@@ -59,6 +61,7 @@ pub struct ParsedToken {
 pub struct TokenJob {
     pub token_id: u64,
     pub expert_id: u8,
+    pub sequence_id: u32,
     pub frame: FrameDesc,
     pub payload_offset: usize,
     pub feature_length: usize,
@@ -71,6 +74,7 @@ pub struct EngineDispatcher {
     metrics: std::sync::Arc<PipelineTelemetry>,
     predictor: Option<TokenAwarePredictor>,
     quantizer: Option<ElasticQuantizer>,
+    sequence_tracker: SequenceTracker,
 }
 
 impl EngineDispatcher {
@@ -83,6 +87,7 @@ impl EngineDispatcher {
             metrics,
             predictor: None,
             quantizer: None,
+            sequence_tracker: SequenceTracker::default(),
         }
     }
 
@@ -96,6 +101,7 @@ impl EngineDispatcher {
             metrics,
             predictor: Some(predictor),
             quantizer: None,
+            sequence_tracker: SequenceTracker::default(),
         }
     }
 
@@ -110,6 +116,7 @@ impl EngineDispatcher {
             metrics,
             predictor,
             quantizer,
+            sequence_tracker: SequenceTracker::default(),
         }
     }
 
@@ -198,11 +205,17 @@ impl EngineDispatcher {
                 .map_err(|_| FrameDropReason::Truncated)?,
         );
         let expert_id = frame[payload_offset + 9];
+        let sequence_id = u32::from_be_bytes(
+            frame[payload_offset + 10..payload_offset + 14]
+                .try_into()
+                .map_err(|_| FrameDropReason::Truncated)?,
+        );
         let feature_length = udp_total_len - UDP_HEADER_LEN - TOKEN_HEADER_LEN;
 
         Ok(ParsedToken {
             token_id,
             expert_id,
+            sequence_id,
             payload_offset,
             feature_length,
         })
@@ -228,6 +241,15 @@ impl EngineDispatcher {
             }
         };
         self.metrics.record_phase_latency(0, received_at.elapsed());
+        if self
+            .sequence_tracker
+            .observe(parsed.expert_id, parsed.sequence_id)
+            .is_some()
+        {
+            self.metrics
+                .nack_requests_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
 
         let mut selected_expert = parsed.expert_id as usize;
         if let Some(predictor) = &self.predictor {
@@ -292,6 +314,7 @@ impl EngineDispatcher {
         let job = TokenJob {
             token_id: parsed.token_id,
             expert_id: selected_expert as u8,
+            sequence_id: parsed.sequence_id,
             frame: frame_desc,
             payload_offset: parsed.payload_offset,
             feature_length: parsed.feature_length,
@@ -367,6 +390,7 @@ mod tests {
         frame[token_offset] = TOKEN_MAGIC;
         frame[token_offset + 1..token_offset + 9].copy_from_slice(&42u64.to_be_bytes());
         frame[token_offset + 9] = expert;
+        frame[token_offset + 10..token_offset + 14].copy_from_slice(&1u32.to_be_bytes());
         frame
     }
     #[test]

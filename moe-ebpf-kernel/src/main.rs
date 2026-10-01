@@ -22,6 +22,7 @@ pub struct TokenPacketHeader {
     pub magic_byte: u8,
     pub token_id: u64,
     pub target_expert_id: u8,
+    pub sequence_id: u32,
 }
 
 #[inline(always)]

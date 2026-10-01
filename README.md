@@ -38,6 +38,7 @@ For a repeatable uniform-versus-skewed traffic report on Linux, run `bash script
 For the comparison matrix, run `bash scripts/run_baseline_matrix.sh 30 benchmark-matrix`; it records the standard UDP and simulated phases plus explicit native-NIC gates for AF_XDP copy and zero-copy.
 
 For the FP32 versus INT8 quantization profile, run `cargo bench --bench quantization_profiles`. It reports throughput and p99 latency for the current owned-buffer quantizer; it is not a claim about in-place VRAM quantization.
+For one-command reviewer verification, run `bash scripts/run_benchmarks.sh`; it executes formatting, clippy, host tests, and the quantization benchmark in sequence.
 
 The `NackTxQueue` adapter uses the real `xsk-rs` TX and completion-ring APIs to submit fixed-size NACK frames from UMEM-owned descriptors. Live loader wiring still requires reserving TX frames and adding a sequence field to the token packet contract; the current 10-byte header has no independent sequence identifier.
 

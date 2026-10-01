@@ -50,6 +50,7 @@ pub struct PipelineTelemetry {
     pub reroutes_total: AtomicU64,
     pub low_confidence_predictions_total: AtomicU64,
     pub fallback_routed_total: AtomicU64,
+    pub nack_requests_total: AtomicU64,
     pub expert_dispatched: [AtomicU64; EXPERT_METRIC_COUNT],
     pub expert_drops: [AtomicU64; EXPERT_METRIC_COUNT],
     pub expert_queue_depth: [AtomicU64; EXPERT_METRIC_COUNT],
@@ -81,6 +82,7 @@ impl Default for PipelineTelemetry {
             reroutes_total: AtomicU64::new(0),
             low_confidence_predictions_total: AtomicU64::new(0),
             fallback_routed_total: AtomicU64::new(0),
+            nack_requests_total: AtomicU64::new(0),
             expert_dispatched: std::array::from_fn(|_| AtomicU64::new(0)),
             expert_drops: std::array::from_fn(|_| AtomicU64::new(0)),
             expert_queue_depth: std::array::from_fn(|_| AtomicU64::new(0)),
@@ -278,6 +280,12 @@ impl PipelineTelemetry {
             "moe_fallback_routed_total",
             "Jobs rerouted to the configured fallback expert",
             self.fallback_routed_total.load(Ordering::Relaxed),
+        );
+        render_counter(
+            &mut output,
+            "moe_nack_requests_total",
+            "Sequence-gap NACK requests detected in userspace",
+            self.nack_requests_total.load(Ordering::Relaxed),
         );
         render_labeled_gauge_header(
             &mut output,

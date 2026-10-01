@@ -117,7 +117,8 @@
         {"expr": "rate(moe_predictions_total[5m])", "legendFormat": "Predictions/s", "refId": "A"},
         {"expr": "rate(moe_reroutes_total[5m])", "legendFormat": "Reroutes/s", "refId": "B"},
         {"expr": "rate(moe_low_confidence_predictions_total[5m])", "legendFormat": "Low-confidence/s", "refId": "C"},
-        {"expr": "rate(moe_fallback_routed_total[5m])", "legendFormat": "Fallback routed/s", "refId": "D"}
+        {"expr": "rate(moe_fallback_routed_total[5m])", "legendFormat": "Fallback routed/s", "refId": "D"},
+        {"expr": "rate(moe_nack_requests_total[5m])", "legendFormat": "NACK requests/s", "refId": "E"}
       ],
       "title": "Routing Intelligence",
       "type": "timeseries"

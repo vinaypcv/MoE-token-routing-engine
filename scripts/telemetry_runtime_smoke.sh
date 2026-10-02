@@ -26,7 +26,8 @@ if curl --silent --fail --max-time 1 "${metrics_url}" >/dev/null 2>&1; then
     exit 1
 fi
 
-./target/release/telemetry_demo >"${log_file}" 2>&1 &
+MOE_METRICS_ADDR="${metrics_addr}" MOE_DEMO_UDP_ADDR="${udp_addr}" \
+    ./target/release/telemetry_demo >"${log_file}" 2>&1 &
 demo_pid=$!
 
 ready=0

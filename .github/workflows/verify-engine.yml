@@ -12,6 +12,7 @@ env:
 jobs:
   validate-and-test:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - name: Checkout Code Base
         uses: actions/checkout@v5
@@ -45,22 +46,38 @@ jobs:
           export MOE_DEMO_UDP_ADDR=127.0.0.1:9000
           export MOE_DEMO_ADAPTIVE_BACKPRESSURE=true
           export MOE_DEMO_LOAD_SHEDDING=expert-aware
-          cargo build --release --bin traffic_profiler
-          cargo run --release --bin telemetry_demo > /tmp/moe-telemetry.log 2>&1 &
+          cargo build --release --bin traffic_profiler --bin telemetry_demo
+          ./target/release/telemetry_demo > /tmp/moe-telemetry.log 2>&1 &
           telemetry_pid=$!
-          trap 'kill "$telemetry_pid" 2>/dev/null || true' EXIT
+          cleanup() {
+            kill -TERM "$telemetry_pid" 2>/dev/null || true
+            wait "$telemetry_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          ready=0
           for attempt in $(seq 1 50); do
-            curl --silent --fail http://127.0.0.1:9100/metrics >/dev/null && break
+            if curl --silent --fail --max-time 1 http://127.0.0.1:9100/metrics >/dev/null; then
+              ready=1
+              break
+            fi
+            kill -0 "$telemetry_pid" 2>/dev/null || break
             sleep 0.2
           done
+          if [[ "$ready" != 1 ]]; then
+            cat /tmp/moe-telemetry.log
+            echo 'telemetry_demo failed to become ready' >&2
+            exit 1
+          fi
           mkdir -p artifacts
           bash scripts/run_traffic_benchmark_report.sh \
             127.0.0.1:9000 4 10 8 40000 256 artifacts/traffic-report.csv
           cp artifacts/traffic-report.json artifacts/traffic-report-metadata.json
           cp /tmp/moe-telemetry.log artifacts/telemetry.log
+        timeout-minutes: 3
 
       - name: Verify UDP-to-Metrics Runtime Path
         run: bash scripts/telemetry_runtime_smoke.sh
+        timeout-minutes: 2
 
       - name: Upload Simulation Evidence
         uses: actions/upload-artifact@v4

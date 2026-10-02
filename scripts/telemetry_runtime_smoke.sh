@@ -10,11 +10,13 @@ demo_pid=''
 
 cleanup() {
     if [[ -n "${demo_pid}" ]]; then
-        kill -INT "${demo_pid}" 2>/dev/null || true
+        kill -TERM "${demo_pid}" 2>/dev/null || true
         wait "${demo_pid}" 2>/dev/null || true
     fi
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 cd "${repo_root}"
 cargo build --release --bin telemetry_demo --bin traffic_profiler
@@ -44,7 +46,8 @@ if [[ "${ready}" != 1 ]]; then
     exit 1
 fi
 
-./target/release/traffic_profiler "${udp_addr}" 1 1 8 uniform 70 100 16
+timeout --signal=TERM --kill-after=2s 15s \
+    ./target/release/traffic_profiler "${udp_addr}" 1 1 8 uniform 70 100 16
 
 metrics="$(curl --silent --show-error --fail --max-time 2 "${metrics_url}")"
 metric_value() {

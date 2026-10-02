@@ -27,6 +27,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
         .unwrap_or(false);
     let load_shedding = env::var("MOE_DEMO_LOAD_SHEDDING").unwrap_or_else(|_| "oldest".to_owned());
+    let embed_ingress_timestamp = env::var("MOE_EMBED_T0")
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
+        .unwrap_or(false);
     if !matches!(
         load_shedding.as_str(),
         "oldest" | "priority" | "expert-aware"
@@ -63,8 +66,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .service_capacity_per_tick
         .store(current_service_per_tick, Ordering::Relaxed);
     let mut service_interval = tokio::time::interval(Duration::from_millis(100));
-    let mut admitted_at: [VecDeque<(std::time::Instant, std::time::Instant)>; EXPERT_METRIC_COUNT] =
-        std::array::from_fn(|_| VecDeque::new());
+    let mut admitted_at: [VecDeque<(std::time::Instant, std::time::Instant, Option<u64>)>;
+        EXPERT_METRIC_COUNT] = std::array::from_fn(|_| VecDeque::new());
     loop {
         tokio::select! {
             received = socket.recv_from(&mut packet) => {
@@ -87,6 +90,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
 
+                let ingress_timestamp_ns = if embed_ingress_timestamp {
+                    if length < 22 {
+                        telemetry.invalid_packets_total.fetch_add(1, Ordering::Relaxed);
+                        telemetry.drop_reasons[0].fetch_add(1, Ordering::Relaxed);
+                        telemetry.record_recycled(1);
+                        continue;
+                    }
+                    Some(u64::from_be_bytes(packet[14..22].try_into().expect("timestamp has 8 bytes")))
+                } else {
+                    None
+                };
+
                 let depth = &telemetry.expert_queue_depth[expert_id];
                 let admission_limit = match load_shedding.as_str() {
                     "priority" if expert_id != 0 => queue_capacity.saturating_mul(3) / 4,
@@ -103,7 +118,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     telemetry.record_phase_latency(0, received_at.elapsed());
                     telemetry.dispatched_total.fetch_add(1, Ordering::Relaxed);
                     telemetry.expert_dispatched[expert_id].fetch_add(1, Ordering::Relaxed);
-                    admitted_at[expert_id].push_back((received_at, admitted_at_now));
+                    admitted_at[expert_id].push_back((
+                        received_at,
+                        admitted_at_now,
+                        ingress_timestamp_ns,
+                    ));
                     if length == 10 {
                         telemetry.execution_errors.fetch_add(1, Ordering::Relaxed);
                     }
@@ -151,12 +170,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     telemetry.processed_jobs.fetch_add(completed, Ordering::Relaxed);
                                     telemetry.record_recycled(completed);
                                     for _ in 0..completed {
-                                        if let Some((received_at, admitted_at)) =
+                                        if let Some((received_at, admitted_at, ingress_timestamp_ns)) =
                                             admitted_at[expert_id].pop_front()
                                         {
                                             telemetry.record_phase_latency(1, admitted_at.elapsed());
                                             telemetry.record_phase_latency(2, Duration::ZERO);
                                             telemetry.record_job_latency(received_at.elapsed());
+                                            if let Some(ingress_timestamp_ns) = ingress_timestamp_ns {
+                                                if let Ok(completion_timestamp_ns) =
+                                                    moe_holistic_engine::engine::clock::monotonic_now_ns()
+                                                {
+                                                    if let Some(execution_latency_ns) =
+                                                        completion_timestamp_ns.checked_sub(ingress_timestamp_ns)
+                                                    {
+                                                        telemetry.record_execution_latency_ns(execution_latency_ns);
+                                                    } else {
+                                                        telemetry.execution_timestamp_errors_total.fetch_add(1, Ordering::Relaxed);
+                                                    }
+                                                } else {
+                                                    telemetry.execution_timestamp_errors_total.fetch_add(1, Ordering::Relaxed);
+                                                }
+                                            }
                                         }
                                     }
                                 }

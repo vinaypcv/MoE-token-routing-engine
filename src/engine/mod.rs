@@ -1,5 +1,6 @@
 pub mod adaptive_quant_routing;
 pub mod backpressure;
+pub mod clock;
 pub mod dispatcher;
 pub mod elastic_quant;
 pub mod nack;

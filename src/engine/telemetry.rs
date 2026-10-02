@@ -27,6 +27,9 @@ pub const DROP_REASON_NAMES: [&str; DROP_REASON_COUNT] = [
 const LATENCY_BUCKETS_MICROS: [u64; 9] = [
     100, 500, 1_000, 5_000, 10_000, 50_000, 100_000, 500_000, 1_000_000,
 ];
+const EXECUTION_LATENCY_LOWEST_NS: u64 = 100;
+const EXECUTION_LATENCY_HIGHEST_NS: u64 = 10_000_000_000;
+const EXECUTION_LATENCY_PRECISION: f64 = 1.01;
 
 pub struct PipelineTelemetry {
     pub rx_packets_total: AtomicU64,
@@ -41,6 +44,11 @@ pub struct PipelineTelemetry {
     pub job_latency_bucket: [AtomicU64; LATENCY_BUCKETS_MICROS.len()],
     pub job_latency_sum_nanos: AtomicU64,
     pub job_latency_count: AtomicU64,
+    execution_latency_bounds_nanos: Vec<u64>,
+    execution_latency_bucket: Vec<AtomicU64>,
+    pub execution_latency_sum_nanos: AtomicU64,
+    pub execution_latency_count: AtomicU64,
+    pub execution_timestamp_errors_total: AtomicU64,
     pub phase_latency_bucket: [[AtomicU64; LATENCY_BUCKETS_MICROS.len()]; LATENCY_PHASE_COUNT],
     pub phase_latency_sum_nanos: [AtomicU64; LATENCY_PHASE_COUNT],
     pub phase_latency_count: [AtomicU64; LATENCY_PHASE_COUNT],
@@ -60,6 +68,24 @@ pub struct PipelineTelemetry {
 
 impl Default for PipelineTelemetry {
     fn default() -> Self {
+        let mut execution_latency_bounds_nanos = vec![EXECUTION_LATENCY_LOWEST_NS];
+        while *execution_latency_bounds_nanos
+            .last()
+            .expect("execution histogram begins with a bound")
+            < EXECUTION_LATENCY_HIGHEST_NS
+        {
+            let previous = *execution_latency_bounds_nanos
+                .last()
+                .expect("execution histogram has a bound");
+            let next = ((previous as f64 * EXECUTION_LATENCY_PRECISION).ceil() as u64)
+                .max(previous + 1)
+                .min(EXECUTION_LATENCY_HIGHEST_NS);
+            execution_latency_bounds_nanos.push(next);
+        }
+        let execution_latency_bucket = execution_latency_bounds_nanos
+            .iter()
+            .map(|_| AtomicU64::new(0))
+            .collect();
         Self {
             rx_packets_total: AtomicU64::new(0),
             dispatched_total: AtomicU64::new(0),
@@ -73,6 +99,11 @@ impl Default for PipelineTelemetry {
             job_latency_bucket: std::array::from_fn(|_| AtomicU64::new(0)),
             job_latency_sum_nanos: AtomicU64::new(0),
             job_latency_count: AtomicU64::new(0),
+            execution_latency_bounds_nanos,
+            execution_latency_bucket,
+            execution_latency_sum_nanos: AtomicU64::new(0),
+            execution_latency_count: AtomicU64::new(0),
+            execution_timestamp_errors_total: AtomicU64::new(0),
             phase_latency_bucket: std::array::from_fn(|_| {
                 std::array::from_fn(|_| AtomicU64::new(0))
             }),
@@ -102,6 +133,19 @@ impl PipelineTelemetry {
 
     pub fn record_job_latency(&self, elapsed: std::time::Duration) {
         self.record_phase_latency(3, elapsed);
+    }
+
+    pub fn record_execution_latency_ns(&self, elapsed_nanos: u64) {
+        let bucket_index = self
+            .execution_latency_bounds_nanos
+            .partition_point(|bound| *bound < elapsed_nanos)
+            .min(self.execution_latency_bucket.len() - 1);
+        for bucket in self.execution_latency_bucket.iter().skip(bucket_index) {
+            bucket.fetch_add(1, Ordering::Relaxed);
+        }
+        self.execution_latency_sum_nanos
+            .fetch_add(elapsed_nanos, Ordering::Relaxed);
+        self.execution_latency_count.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_phase_latency(&self, phase: usize, elapsed: std::time::Duration) {
@@ -209,6 +253,44 @@ impl PipelineTelemetry {
             output,
             "moe_job_latency_seconds_count {}",
             self.job_latency_count.load(Ordering::Relaxed)
+        );
+        let _ = writeln!(
+            output,
+            "# HELP moe_ingress_to_completion_latency_seconds Sender monotonic timestamp to synthetic consumer completion"
+        );
+        let _ = writeln!(
+            output,
+            "# TYPE moe_ingress_to_completion_latency_seconds histogram"
+        );
+        for (index, boundary) in self.execution_latency_bounds_nanos.iter().enumerate() {
+            let _ = writeln!(
+                output,
+                "moe_ingress_to_completion_latency_seconds_bucket{{le=\"{}\"}} {}",
+                *boundary as f64 / 1_000_000_000.0,
+                self.execution_latency_bucket[index].load(Ordering::Relaxed)
+            );
+        }
+        let _ = writeln!(
+            output,
+            "moe_ingress_to_completion_latency_seconds_bucket{{le=\"+Inf\"}} {}",
+            self.execution_latency_count.load(Ordering::Relaxed)
+        );
+        let _ = writeln!(
+            output,
+            "moe_ingress_to_completion_latency_seconds_sum {}",
+            self.execution_latency_sum_nanos.load(Ordering::Relaxed) as f64 / 1_000_000_000.0
+        );
+        let _ = writeln!(
+            output,
+            "moe_ingress_to_completion_latency_seconds_count {}",
+            self.execution_latency_count.load(Ordering::Relaxed)
+        );
+        render_counter(
+            &mut output,
+            "moe_execution_timestamp_errors_total",
+            "Invalid, future, or unavailable cross-process monotonic timestamps",
+            self.execution_timestamp_errors_total
+                .load(Ordering::Relaxed),
         );
         for (phase, phase_name) in LATENCY_PHASE_NAMES.iter().enumerate() {
             let _ = writeln!(
@@ -460,5 +542,21 @@ mod tests {
         assert!(rendered.contains("moe_job_latency_seconds_bucket{le=\"0.0005\"} 1"));
         assert!(rendered.contains("moe_job_latency_seconds_bucket{le=\"0.001\"} 2"));
         assert!(rendered.contains("moe_job_latency_seconds_bucket{le=\"+Inf\"} 2"));
+    }
+
+    #[test]
+    fn execution_latency_histogram_reports_cumulative_nanosecond_buckets() {
+        let metrics = PipelineTelemetry::default();
+        metrics.record_execution_latency_ns(150);
+        metrics.record_execution_latency_ns(1_500);
+        let rendered = metrics.render_prometheus();
+        assert!(rendered.contains("moe_ingress_to_completion_latency_seconds_count 2"));
+        assert!(rendered
+            .contains("moe_ingress_to_completion_latency_seconds_bucket{le=\"0.0000001\"} 0"));
+        assert!(rendered
+            .contains("moe_ingress_to_completion_latency_seconds_bucket{le=\"0.000000151\"} 1"));
+        assert!(
+            rendered.contains("moe_ingress_to_completion_latency_seconds_bucket{le=\"+Inf\"} 2")
+        );
     }
 }

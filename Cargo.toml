@@ -43,6 +43,10 @@ name = "traffic_profiler"
 path = "src/bin/traffic_profiler.rs"
 
 [[bin]]
+name = "raw_packet_profiler"
+path = "src/bin/raw_packet_profiler.rs"
+
+[[bin]]
 name = "telemetry_demo"
 path = "src/bin/telemetry_demo.rs"
 

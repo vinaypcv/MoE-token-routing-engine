@@ -6,7 +6,8 @@ use crossbeam_channel::Receiver;
 use xsk_rs::umem::Umem;
 
 use super::backpressure::{FrameGuard, FrameRecycler};
-use super::dispatcher::TokenJob;
+use super::clock::measurement_now_ns;
+use super::dispatcher::{TokenJob, TOKEN_HEADER_LEN};
 use super::telemetry::{PipelineTelemetry, EXPERT_METRIC_COUNT};
 
 pub trait ExpertModel: Send + Sync + 'static {
@@ -17,6 +18,21 @@ pub trait ExpertModel: Send + Sync + 'static {
 pub struct LinearExpertModel {
     expert_id: u8,
     weights: Vec<f32>,
+}
+
+fn feature_payload(
+    packet: &[u8],
+    payload_offset: usize,
+    feature_length: usize,
+    has_ingress_timestamp: bool,
+) -> &[u8] {
+    let timestamp_feature_len = if has_ingress_timestamp { 8 } else { 0 };
+    if feature_length < timestamp_feature_len {
+        return &[];
+    }
+    let feature_start = payload_offset + TOKEN_HEADER_LEN + timestamp_feature_len;
+    let feature_end = payload_offset + TOKEN_HEADER_LEN + feature_length;
+    packet.get(feature_start..feature_end).unwrap_or(&[])
 }
 
 impl LinearExpertModel {
@@ -70,14 +86,17 @@ pub(crate) fn spawn_expert_worker<M: ExpertModel + ?Sized>(
                 }
 
                 let packet_data = unsafe { umem.data(&job.frame) };
-                let feature_start = job.payload_offset + 10;
-                let feature_end = feature_start.saturating_add(job.feature_length);
-                let features = packet_data
-                    .contents()
-                    .get(feature_start..feature_end)
-                    .unwrap_or(&[]);
+                let features = feature_payload(
+                    packet_data.contents(),
+                    job.payload_offset,
+                    job.feature_length,
+                    job.ingress_timestamp_ns.is_some(),
+                );
                 let execution_started = std::time::Instant::now();
-                match model.process_token(job.token_id, features) {
+                let processing_result = model.process_token(job.token_id, features);
+                let completion_timestamp_ns =
+                    job.ingress_timestamp_ns.map(|_| measurement_now_ns());
+                match processing_result {
                     Ok(()) => {
                         telemetry
                             .processed_jobs
@@ -93,6 +112,44 @@ pub(crate) fn spawn_expert_worker<M: ExpertModel + ?Sized>(
                         telemetry.record_job_latency(job.received_at.elapsed());
                     }
                 }
+                if let Some(ingress_timestamp_ns) = job.ingress_timestamp_ns {
+                    match completion_timestamp_ns
+                        .and_then(Result::ok)
+                        .and_then(|completed_ns| completed_ns.checked_sub(ingress_timestamp_ns))
+                    {
+                        Some(elapsed_ns) if ingress_timestamp_ns > 0 => {
+                            telemetry.record_execution_latency_ns(elapsed_ns);
+                        }
+                        _ => {
+                            telemetry
+                                .execution_timestamp_errors_total
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                }
             }
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn feature_slice_skips_full_v2_header_and_optional_timestamp_prefix() {
+        let payload_offset = 7;
+        let mut packet = vec![0u8; payload_offset + TOKEN_HEADER_LEN + 8 + 3];
+        packet[payload_offset..payload_offset + TOKEN_HEADER_LEN].fill(0x11);
+        packet[payload_offset + TOKEN_HEADER_LEN..payload_offset + TOKEN_HEADER_LEN + 8].fill(0x22);
+        packet[payload_offset + TOKEN_HEADER_LEN + 8..].copy_from_slice(&[3, 4, 5]);
+
+        assert_eq!(
+            feature_payload(&packet, payload_offset, 11, true),
+            &[3, 4, 5]
+        );
+        assert_eq!(
+            feature_payload(&packet, payload_offset, 11, false),
+            &[0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 3, 4, 5]
+        );
+    }
 }

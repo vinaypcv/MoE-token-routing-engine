@@ -178,7 +178,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             telemetry.record_job_latency(received_at.elapsed());
                                             if let Some(ingress_timestamp_ns) = ingress_timestamp_ns {
                                                 if let Ok(completion_timestamp_ns) =
-                                                    moe_holistic_engine::engine::clock::monotonic_now_ns()
+                                                    moe_holistic_engine::engine::clock::measurement_now_ns()
                                                 {
                                                     if let Some(execution_latency_ns) =
                                                         completion_timestamp_ns.checked_sub(ingress_timestamp_ns)

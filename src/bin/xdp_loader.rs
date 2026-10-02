@@ -90,6 +90,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         PathBuf::from("target/bpfel-unknown-none/release/libmoe_ebpf_kernel.so")
     });
     let nack_tx_config = load_nack_tx_config()?;
+    let capture_ingress_timestamp = env::var("MOE_EMBED_T0")
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
+        .unwrap_or(false);
 
     let mut bpf = Bpf::load_file(&object_path)?;
 
@@ -184,13 +187,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let quantizer = fallback_expert
         .map(|expert_id| ElasticQuantizer::new(90, Some(expert_id)))
         .transpose()?;
-    let router = BackpressureRouter::new_with_routing(
+    let router = BackpressureRouter::new_with_routing_and_timing(
         umem.clone(),
         DEFAULT_EXPERT_COUNT,
         DEFAULT_EXPERT_QUEUE_CAPACITY,
         UMEM_FRAME_COUNT as usize,
         predictor,
         quantizer,
+        capture_ingress_timestamp,
     )?;
     let metrics = router.metrics();
     metrics.record_recycled(seeded_frames as u64);

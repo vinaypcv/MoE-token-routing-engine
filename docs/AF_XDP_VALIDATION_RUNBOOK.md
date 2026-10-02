@@ -27,7 +27,10 @@ The workspace includes a `no_std` eBPF crate, so do not run `cargo check --works
 
 The experimental `engine::umem_dmabuf` pool maps anonymous host memory or an already-exported DMA-BUF FD. It does not allocate storage from `/dev/vgem`, register memory with `xsk-rs`, or establish AF_XDP zero-copy; those claims require separate exporter, driver, and NIC integration and validation.
 
-For a bounded local UDP/synthetic-MoE comparison, run `bash scripts/run_baremetal_benchmarks.sh`. It writes the standard UDP baseline, telemetry log, and Zipf JSON report under `artifacts/benchmarks/`. Set `MOE_EMBED_T0=true` to place a Linux `CLOCK_MONOTONIC` nanosecond timestamp in the first eight feature bytes; those bytes are then reserved for measurement and are not ordinary model features. The demo exports `moe_ingress_to_completion_latency_seconds`, measured from sender batch timestamp through synthetic service completion. This loopback harness does not attach AF_XDP, measure NIC line rate, or collect hardware performance counters; run the native-NIC procedure below separately.
+The local UDP/synthetic-MoE comparison is available through `bash scripts/telemetry_runtime_smoke.sh` and `bash scripts/run_baremetal_benchmarks.sh` only when configured with a hardware DUT and separate raw-frame generator host. The profiler can embed a Linux `CLOCK_MONOTONIC` nanosecond timestamp in the first eight feature bytes; these bytes are reserved for measurement and are excluded from model features when timing is enabled. `telemetry_demo` reports synthetic completion timing; the AF_XDP loader reports real worker completion timing when `MOE_EMBED_T0=true`. Neither path by itself proves NIC zero-copy; use the native-NIC procedure below and retain all counter snapshots.
+
+For a native AF_XDP run, execute `scripts/run_baremetal_benchmarks.sh` on the DUT after building the BPF object and loader, and copy `target/release/raw_packet_profiler` to a separate generator host. Set `IFACE`, `QUEUE_ID`, `GENERATOR_HOST`, `GENERATOR_IFACE`, `DUT_MAC`, `GENERATOR_SRC_IP`, `DUT_DST_IP`, and optionally `MOE_PEER_RAW_PROFILER`. The script requires `sudo`, `ethtool`, `perf`, and SSH access to the peer; it records interface/driver/NIC snapshots, runs the loader under `perf`, and sends raw Ethernet Token Header v2 frames from the peer. It does not modify offloads, ring sizes, or hugepages. Compare the generator count, NIC deltas, AF_XDP RX count, and processed jobs before claiming a lossless run. Driver-specific zero-copy evidence must still be reviewed independently.
+Cross-host latency uses `CLOCK_TAI`, not `CLOCK_MONOTONIC`: monotonic clock epochs are local to each host and cannot be subtracted across machines. Before setting `MOE_PTP_SYNC_CONFIRMED=1`, verify that both hosts are disciplined to the same PTP grandmaster and record the measured clock offset/uncertainty. The harness refuses cross-host timing unless that confirmation is supplied. Report latency uncertainty with the results; if PTP synchronization cannot be established, disable T0 timing for hardware runs and report only same-host durations and throughput.
 
 ## Baseline
 
@@ -41,7 +44,7 @@ Record packets per second, packet loss, CPU utilization, and the exact generator
 
 ## AF_XDP run
 
-Set metrics to a protected address and attach to the disposable interface:
+Set metrics to a protected address and attach to the disposable interface. Ensure the generator's UDP 5-tuple is directed to the selected RX queue with driver-supported RSS/ntuple steering; the loader installs only that queue in XSKMAP and this repository does not configure NIC steering rules.
 
 ```bash
 export MOE_METRICS_ADDR=127.0.0.1:9100
@@ -57,7 +60,7 @@ Confirm that the loader explicitly reports zero-copy attachment. Generate the sa
 - NIC RX errors, missed packets, and queue statistics
 - process CPU, context switches, and memory bandwidth
 
-The run is valid only when packet accounting agrees across the generator, NIC, XDP/AF_XDP counters, and application metrics within the documented loss budget.
+The run is valid only when packet accounting agrees across the generator, NIC, AF_XDP RX (`moe_rx_packets_total`), and processed-job metrics within the documented loss budget. The current eBPF program does not expose an independent XDP redirect counter, so do not describe the AF_XDP RX counter as a separate kernel-program counter.
 
 To test the opt-in NACK TX path, set `MOE_NACK_TX_ENABLED=true` and configure `MOE_NACK_SOURCE_MAC`, `MOE_NACK_DESTINATION_MAC`, `MOE_NACK_SOURCE_IP`, `MOE_NACK_DESTINATION_IP`, `MOE_NACK_SOURCE_PORT`, and `MOE_NACK_DESTINATION_PORT` for the test link and cooperating sender. Confirm sequence gaps increment `moe_nack_requests_total`, successful ring submissions increment `moe_nack_tx_sent_total`, and TX exhaustion increments `moe_nack_tx_unavailable_total`. The peer must implement retransmission; the loader only emits requests.
 

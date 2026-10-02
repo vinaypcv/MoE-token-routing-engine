@@ -256,7 +256,7 @@ impl PipelineTelemetry {
         );
         let _ = writeln!(
             output,
-            "# HELP moe_ingress_to_completion_latency_seconds Sender monotonic timestamp to synthetic consumer completion"
+            "# HELP moe_ingress_to_completion_latency_seconds Sender CLOCK_MONOTONIC T0 to expert worker completion"
         );
         let _ = writeln!(
             output,

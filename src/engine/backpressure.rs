@@ -104,6 +104,26 @@ impl BackpressureRouter {
         predictor: Option<TokenAwarePredictor>,
         quantizer: Option<ElasticQuantizer>,
     ) -> io::Result<Self> {
+        Self::new_with_routing_and_timing(
+            umem,
+            expert_count,
+            queue_capacity,
+            frame_pool_capacity,
+            predictor,
+            quantizer,
+            false,
+        )
+    }
+
+    pub fn new_with_routing_and_timing(
+        umem: Umem,
+        expert_count: usize,
+        queue_capacity: usize,
+        frame_pool_capacity: usize,
+        predictor: Option<TokenAwarePredictor>,
+        quantizer: Option<ElasticQuantizer>,
+        capture_ingress_timestamp: bool,
+    ) -> io::Result<Self> {
         if expert_count == 0
             || expert_count > EXPERT_METRIC_COUNT
             || queue_capacity == 0
@@ -140,11 +160,12 @@ impl BackpressureRouter {
             workers.push(worker);
         }
 
-        let dispatcher = EngineDispatcher::with_routing(
+        let dispatcher = EngineDispatcher::with_routing_and_timing(
             expert_senders,
             Arc::clone(&metrics),
             predictor,
             quantizer,
+            capture_ingress_timestamp,
         );
         Ok(Self {
             dispatcher: Some(dispatcher),

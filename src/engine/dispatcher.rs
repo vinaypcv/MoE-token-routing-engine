@@ -65,6 +65,7 @@ pub struct TokenJob {
     pub frame: FrameDesc,
     pub payload_offset: usize,
     pub feature_length: usize,
+    pub ingress_timestamp_ns: Option<u64>,
     pub enqueued_at: Instant,
     pub received_at: Instant,
 }
@@ -74,6 +75,7 @@ pub struct EngineDispatcher {
     metrics: std::sync::Arc<PipelineTelemetry>,
     predictor: Option<TokenAwarePredictor>,
     quantizer: Option<ElasticQuantizer>,
+    capture_ingress_timestamp: bool,
     sequence_tracker: SequenceTracker,
 }
 
@@ -87,6 +89,7 @@ impl EngineDispatcher {
             metrics,
             predictor: None,
             quantizer: None,
+            capture_ingress_timestamp: false,
             sequence_tracker: SequenceTracker::default(),
         }
     }
@@ -101,6 +104,7 @@ impl EngineDispatcher {
             metrics,
             predictor: Some(predictor),
             quantizer: None,
+            capture_ingress_timestamp: false,
             sequence_tracker: SequenceTracker::default(),
         }
     }
@@ -111,11 +115,22 @@ impl EngineDispatcher {
         predictor: Option<TokenAwarePredictor>,
         quantizer: Option<ElasticQuantizer>,
     ) -> Self {
+        Self::with_routing_and_timing(expert_senders, metrics, predictor, quantizer, false)
+    }
+
+    pub fn with_routing_and_timing(
+        expert_senders: Vec<Sender<TokenJob>>,
+        metrics: std::sync::Arc<PipelineTelemetry>,
+        predictor: Option<TokenAwarePredictor>,
+        quantizer: Option<ElasticQuantizer>,
+        capture_ingress_timestamp: bool,
+    ) -> Self {
         Self {
             expert_senders,
             metrics,
             predictor,
             quantizer,
+            capture_ingress_timestamp,
             sequence_tracker: SequenceTracker::default(),
         }
     }
@@ -240,6 +255,25 @@ impl EngineDispatcher {
                 return Err((frame_desc, reason));
             }
         };
+        let ingress_timestamp_ns = if self.capture_ingress_timestamp {
+            if parsed.feature_length < 8 {
+                self.metrics
+                    .invalid_packets_total
+                    .fetch_add(1, Ordering::Relaxed);
+                self.metrics.drop_reasons[FrameDropReason::Truncated.metric_index()]
+                    .fetch_add(1, Ordering::Relaxed);
+                return Err((frame_desc, FrameDropReason::Truncated));
+            }
+            let timestamp_start = parsed.payload_offset + TOKEN_HEADER_LEN;
+            let timestamp_end = timestamp_start + 8;
+            Some(u64::from_be_bytes(
+                frame_bytes[timestamp_start..timestamp_end]
+                    .try_into()
+                    .expect("validated 8-byte timestamp feature"),
+            ))
+        } else {
+            None
+        };
         self.metrics.record_phase_latency(0, received_at.elapsed());
         if self
             .sequence_tracker
@@ -253,8 +287,9 @@ impl EngineDispatcher {
 
         let mut selected_expert = parsed.expert_id as usize;
         if let Some(predictor) = &self.predictor {
-            let feature_start = parsed.payload_offset + TOKEN_HEADER_LEN;
-            let feature_end = feature_start.saturating_add(parsed.feature_length);
+            let timestamp_feature_bytes = if ingress_timestamp_ns.is_some() { 8 } else { 0 };
+            let feature_start = parsed.payload_offset + TOKEN_HEADER_LEN + timestamp_feature_bytes;
+            let feature_end = parsed.payload_offset + TOKEN_HEADER_LEN + parsed.feature_length;
             let features = frame_bytes.get(feature_start..feature_end).unwrap_or(&[]);
             self.metrics
                 .predictions_total
@@ -318,6 +353,7 @@ impl EngineDispatcher {
             frame: frame_desc,
             payload_offset: parsed.payload_offset,
             feature_length: parsed.feature_length,
+            ingress_timestamp_ns,
             enqueued_at: Instant::now(),
             received_at,
         };
@@ -450,6 +486,54 @@ mod tests {
 
         let parsed = EngineDispatcher::parse_frame(&frame).unwrap();
         assert_eq!(parsed.feature_length, feature_bytes.len());
+    }
+
+    #[test]
+    fn timing_dispatch_extracts_t0_from_feature_prefix() {
+        let timestamp_ns = 123_456_789u64;
+        let mut frame = token_frame(0);
+        frame.extend_from_slice(&timestamp_ns.to_be_bytes());
+        frame.extend_from_slice(&[0xaa, 0xbb]);
+        let ip_length = (IPV4_MIN_HEADER_LEN + UDP_HEADER_LEN + TOKEN_HEADER_LEN + 10) as u16;
+        frame[ETH_HEADER_LEN + 2..ETH_HEADER_LEN + 4].copy_from_slice(&ip_length.to_be_bytes());
+        let udp_offset = ETH_HEADER_LEN + IPV4_MIN_HEADER_LEN;
+        frame[udp_offset + 4..udp_offset + 6]
+            .copy_from_slice(&((UDP_HEADER_LEN + TOKEN_HEADER_LEN + 10) as u16).to_be_bytes());
+
+        let (sender, receiver) = bounded(1);
+        let metrics = std::sync::Arc::new(PipelineTelemetry::default());
+        let dispatcher =
+            EngineDispatcher::with_routing_and_timing(vec![sender], metrics, None, None, true);
+        dispatcher
+            .dispatch_frame(FrameDesc::default(), &frame)
+            .unwrap();
+        let job = receiver.try_recv().unwrap();
+        assert_eq!(job.ingress_timestamp_ns, Some(timestamp_ns));
+        assert_eq!(
+            job.payload_offset,
+            ETH_HEADER_LEN + IPV4_MIN_HEADER_LEN + UDP_HEADER_LEN
+        );
+        assert_eq!(job.feature_length, 10);
+    }
+
+    #[test]
+    fn timing_dispatch_rejects_missing_timestamp_feature_bytes() {
+        let (sender, _receiver) = bounded(1);
+        let metrics = std::sync::Arc::new(PipelineTelemetry::default());
+        let dispatcher = EngineDispatcher::with_routing_and_timing(
+            vec![sender],
+            metrics.clone(),
+            None,
+            None,
+            true,
+        );
+        assert_eq!(
+            dispatcher
+                .dispatch_frame(FrameDesc::default(), &token_frame(0))
+                .unwrap_err()
+                .1,
+            FrameDropReason::Truncated
+        );
     }
 
     #[test]

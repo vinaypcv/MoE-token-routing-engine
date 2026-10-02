@@ -27,6 +27,8 @@ The workspace includes a `no_std` eBPF crate, so do not run `cargo check --works
 
 The experimental `engine::umem_dmabuf` pool maps anonymous host memory or an already-exported DMA-BUF FD. It does not allocate storage from `/dev/vgem`, register memory with `xsk-rs`, or establish AF_XDP zero-copy; those claims require separate exporter, driver, and NIC integration and validation.
 
+For a bounded local UDP/synthetic-MoE comparison, run `bash scripts/run_baremetal_benchmarks.sh`. It writes the standard UDP baseline, telemetry log, and Zipf JSON report under `artifacts/benchmarks/`. Set `MOE_EMBED_T0=true` to place a Linux `CLOCK_MONOTONIC` nanosecond timestamp in the first eight feature bytes; those bytes are then reserved for measurement and are not ordinary model features. The demo exports `moe_ingress_to_completion_latency_seconds`, measured from sender batch timestamp through synthetic service completion. This loopback harness does not attach AF_XDP, measure NIC line rate, or collect hardware performance counters; run the native-NIC procedure below separately.
+
 ## Baseline
 
 Run the socket-path baseline first and save its output:
